@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.11"
+  NODE_VERSION: "24.21.0"
+  UPX_VERSION: "4.2.4"
+  UPX_SHA256: "75cab4e57ab72fb4585ee45ff36388d280c7afd72aa03e8d4b9c3cbddb474193"
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Download and verify UPX 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/$archive" \
+            --output "$RUNNER_TEMP/$archive"
+          printf '%s  %s\n' "$UPX_SHA256" "$RUNNER_TEMP/$archive" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/upx-${UPX_VERSION}-amd64_linux/upx" --version
+          printf '%s\n' "$RUNNER_TEMP/upx-${UPX_VERSION}-amd64_linux" >> "$GITHUB_PATH"
+      - name: Download dependencies and build WebUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOTOOLCHAIN=local go mod download
+          npm --prefix web ci
+          npm --prefix web run format:check
+          npm --prefix web run check
+          npm --prefix web run build
+      - name: Validate tag and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(go version | awk '{print $3}')" = "go${GO_VERSION}"
+          env GOTOOLCHAIN=local GOPROXY=off go test -count=1 ./...
+          env GOTOOLCHAIN=local GOPROXY=off go vet ./...
+          env GOTOOLCHAIN=local GOPROXY=off go test -race -count=1 ./...
+      - name: Cross-build, compress and verify release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'status=$?; printf "::error title=release build failed::line %s: %s (exit %s)\n" "$LINENO" "$BASH_COMMAND" "$status"' ERR
+          export CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=off
+          bash scripts/build-go.sh
+          binaries=(
+            probexd-linux-amd64
+            probex-darwin-arm64
+            probex-linux-amd64
+            probex-linux-arm64
+            probex-linux-mipsle-softfloat
+            probex-windows-amd64.exe
+          )
+          for name in "${binaries[@]}"; do
+            binary="dist/$name"
+            build_info="$(go version -m "$binary")"
+            grep -Fq "CGO_ENABLED=0" <<< "$build_info"
+            # UPX 4.2.4 disables macOS support; keep this binary unchanged.
+            if [[ "$name" == probex-darwin-arm64 ]]; then continue; fi
+            upx --lzma --best "$binary"
+            upx --test "$binary"
+          done
+          dist/probexd-linux-amd64 --version
+          dist/probex-linux-amd64 --version
+          cd dist
+          sha256sum "${binaries[@]}" README.md THIRD_PARTY_NOTICES > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            printf '::error title=release already exists::GitHub Release %s already exists\n' "$TAG"
+            exit 1
+          fi
+          gh release create "$TAG" dist/* --draft --verify-tag --title "$TAG" --generate-notes
+          gh release edit "$TAG" --draft=false

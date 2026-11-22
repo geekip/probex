@@ -1,0 +1,33 @@
+# Local AI/agent workspace
+/.harness/
+/AGENTS.md
+
+# Local caches and build outputs
+__pycache__/
+*.py[cod]
+build/
+/bin/
+dist/
+node_modules/
+pnpm-lock.yaml
+
+# Local credentials, state, generated outputs
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.token
+*.key
+*.pem
+*.tsbuildinfo
+
+# editor / OS / logs
+.DS_Store
+.idea/
+.vscode/
+*.log
+*.swp
