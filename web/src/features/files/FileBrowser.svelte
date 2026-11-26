@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { ContextMenu, DropdownMenu } from 'bits-ui';
   import {
     ArrowLeft,
@@ -24,9 +24,19 @@
   import type { Transfers } from '@/features/transfers/store.svelte';
   import type { Confirmation } from '@/shared/components/ConfirmDialog.svelte';
   import SearchPopover from '@/shared/components/SearchPopover.svelte';
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import FileNameDialog from '@/features/files/FileNameDialog.svelte';
   import FileLinkDialog from './FileLinkDialog.svelte';
+  import UploadPicker from './UploadPicker.svelte';
+  import UploadConflictDialog from './UploadConflictDialog.svelte';
+  import {
+    checkUpload,
+    createUploadDirectories,
+    type UploadPlan,
+    type UploadSelection,
+  } from './upload-preflight';
   import FileList from './FileList.svelte';
+  import { compareFileEntries, isDirectory } from './entry-sort';
   import { selectRows } from './selection';
   import FileActions from './FileActions.svelte';
   import { clipboard } from './clipboard.svelte';
@@ -35,20 +45,20 @@
   let {
     node,
     active,
+    loadingFiles,
     manager,
     onerror,
     onrequestconfirm,
-    onupload,
     onopen,
     onrenamed,
     onremoved,
   }: {
     node: Node;
     active: boolean;
+    loadingFiles: boolean;
     manager: Transfers;
     onerror: (message: string) => void;
     onrequestconfirm: (request: Confirmation) => void;
-    onupload: (directory: string, kind?: 'files' | 'folder') => void;
     onopen: (entry: FileEntry) => void;
     onrenamed: (path: string, destination: string) => void;
     onremoved: (paths: string[]) => void;
@@ -77,28 +87,43 @@
     localStorage.getItem('probex.files-order') === 'desc' ? 'desc' : 'asc',
   );
   let serviceFailed = $state(false),
-    operating = $state(false);
+    operating = $state(false),
+    reconnecting = $state(false);
   let busy = $state(false),
     error = $state(''),
-    nextFailed = $state(false),
+    retryMode = $state<'more' | 'refresh' | null>(null),
     contextEntry = $state<FileEntry | null>(null);
   let dialog = $state<{
     kind: 'rename' | 'newFile' | 'newDirectory';
     target: string;
     entry?: FileEntry;
   } | null>(null);
-  let sentinel = $state<HTMLDivElement>();
-  let contextLink = $state<FileLink | null>(null),
-    linkDialog = $state<{ link: FileLink | null; directory: string } | null>(
-      null,
-    );
-  let controller: AbortController | undefined,
-    timer: ReturnType<typeof setTimeout>;
-  const selected = $derived(
-    entries.filter((entry) => selection.includes(entry.path)),
+  let linkDialog = $state<{ source?: string; directory: string } | null>(null);
+  let controller: AbortController | undefined;
+  let opened = false;
+  let pendingDirectoryLink = '';
+  let uploadPicker: UploadPicker;
+  let uploadController: AbortController | undefined;
+  let uploadPlan = $state.raw<UploadPlan | null>(null);
+  onDestroy(() => uploadController?.abort());
+  const searchText = $derived(query.toLowerCase());
+  const matches = $derived(
+    searchText
+      ? entries.filter((entry) => entry.name.toLowerCase().includes(searchText))
+      : entries,
   );
-  const uploadRevision = $derived(manager.revision(node.id));
-  let seenUploads = 0;
+  const visibleEntries = $derived(
+    [...matches].sort((a, b) => compareFileEntries(a, b, sort, order)),
+  );
+  const visibleDirectories = $derived(
+    searchText ? matches.filter(isDirectory).length : directories,
+  );
+  const visibleFiles = $derived(
+    searchText ? matches.length - visibleDirectories : files,
+  );
+  const selected = $derived(
+    visibleEntries.filter((entry) => selection.includes(entry.path)),
+  );
   const contextItems = $derived(
     contextEntry
       ? selection.includes(contextEntry.path)
@@ -111,12 +136,6 @@
       ? contextEntry!
       : { name: '', path, type: 'directory' as const },
   );
-  const fields = $derived(
-    [
-      ...columns.filter((column) => column !== 'type'),
-      ...(columns.includes('owner') ? ['group'] : []),
-    ].join(','),
-  );
   const columnLabels = {
     size: 'fileSize',
     mtime: 'modifiedTime',
@@ -126,8 +145,9 @@
   } as const;
   async function load(
     destination: string,
-    mode: 'push' | 'refresh' | 'filter' | 'more' | 'history' = 'push',
+    mode: 'push' | 'refresh' | 'more' | 'history' = 'push',
     nextIndex = index,
+    resolveLink = false,
   ) {
     controller?.abort();
     const request = new AbortController();
@@ -135,57 +155,78 @@
     busy = true;
     error = '';
     serviceFailed = false;
-    nextFailed = false;
-    const keep = mode === 'refresh' ? new Set(selection) : new Set<string>(),
-      previousCount = mode === 'refresh' ? entries.length : 0;
-    if (mode === 'filter') {
-      selection = [];
-      anchor = '';
+    retryMode = null;
+    const initial = index < 0 && !destination;
+    if (resolveLink) pendingDirectoryLink = destination;
+    else if (destination !== path) pendingDirectoryLink = '';
+    const resolving = !!destination && destination === pendingDirectoryLink;
+    if (mode === 'push' || mode === 'history') {
+      if (destination !== path) {
+        entries = [];
+        cursor = '';
+        files = directories = 0;
+        selection = [];
+        contextEntry = null;
+        anchor = '';
+      }
+      path = address = destination;
+      if (mode === 'history') index = nextIndex;
+      else if (!initial && history[index] !== destination) {
+        history = [...history.slice(0, index + 1), destination];
+        index = history.length - 1;
+      }
     }
+    let next = mode === 'more' ? cursor : '';
+    const known = new Set(next ? entries.map((entry) => entry.path) : []);
     try {
+      if (resolving) {
+        const owner = await manager.session();
+        const entry = await fileJSON<FileEntry>(
+          `nodes/${node.id}/resolve?${new URLSearchParams({ path: destination })}`,
+          { signal: request.signal },
+          owner,
+        );
+        if (request.signal.aborted) return;
+        if (entry.type !== 'directory') throw new Error(t('notDirectory'));
+        pendingDirectoryLink = '';
+        destination = entry.path;
+        path = address = destination;
+        history[index] = destination;
+      }
       const owner = await manager.session();
-      let next = mode === 'more' ? cursor : '',
-        collected: FileEntry[] = [];
-      let page: FileListing;
       do {
         const params = new URLSearchParams({
           path: destination,
           hidden: String(hidden),
-          query,
-          fields,
+          fields: 'size,mtime,mode,owner,group',
           limit: '200',
           cursor: next,
-          sort,
-          order,
         });
-        if (index < 0 && !destination) params.set('initial', 'true');
-        page = await fileJSON<FileListing>(
+        if (initial && !next) params.set('initial', 'true');
+        const page = await fileJSON<FileListing>(
           `nodes/${node.id}/files?${params}`,
           { signal: request.signal },
           owner,
         );
-        collected.push(...page.entries);
-        next = page.next_cursor;
-      } while (mode === 'refresh' && next && collected.length < previousCount);
-      if (request.signal.aborted) return;
-      if (mode === 'more') {
-        const known = new Set(entries.map((e) => e.path));
-        entries = [...entries, ...collected.filter((e) => !known.has(e.path))];
-      } else {
-        entries = collected;
-        selection = entries.filter((e) => keep.has(e.path)).map((e) => e.path);
-        anchor = '';
-        if (mode === 'push' && (index < 0 || history[index] !== page.path)) {
-          history = [...history.slice(0, index + 1), page.path];
-          index = history.length - 1;
+        if (request.signal.aborted) return;
+        const added = page.entries.filter((entry) => {
+          if (known.has(entry.path)) return false;
+          known.add(entry.path);
+          return true;
+        });
+        if (next) entries = [...entries, ...added];
+        else {
+          entries = added;
+          destination = path = address = page.path;
+          if (index < 0) index = 0;
+          history[index] = page.path;
+          anchor = '';
         }
-        if (mode === 'history') index = nextIndex;
-      }
-      path = page.path;
-      address = page.path;
-      cursor = next;
-      files = page.file_count;
-      directories = page.directory_count;
+        next = cursor = page.next_cursor;
+        files = page.file_count;
+        directories = page.directory_count;
+      } while (next);
+      selection = selection.filter((entry) => known.has(entry));
     } catch (failure) {
       if (!request.signal.aborted) {
         error = (failure as Error).message;
@@ -194,7 +235,11 @@
           !manager.owner ||
           (failure instanceof FileError &&
             ['node_unavailable', 'node_offline'].includes(failure.code));
-        if (mode === 'more') nextFailed = true;
+        if (next)
+          retryMode =
+            failure instanceof FileError && failure.code === 'invalid_cursor'
+              ? 'refresh'
+              : 'more';
       }
     } finally {
       if (controller === request) busy = false;
@@ -202,9 +247,9 @@
   }
   function select(entry: FileEntry, event: MouseEvent) {
     if (event.shiftKey && anchor) {
-      const a = entries.findIndex((e) => e.path === anchor),
-        b = entries.indexOf(entry);
-      selection = entries
+      const a = visibleEntries.findIndex((e) => e.path === anchor),
+        b = visibleEntries.indexOf(entry);
+      selection = visibleEntries
         .slice(Math.min(a, b), Math.max(a, b) + 1)
         .map((e) => e.path);
     } else if (event.metaKey || event.ctrlKey) {
@@ -231,14 +276,10 @@
     if (resolved.type !== 'directory') throw new Error(t('notDirectory'));
     return resolved.path;
   }
-  async function open(entry: FileEntry) {
-    try {
-      const resolved = await resolveEntry(entry);
-      if (resolved.type === 'directory') void load(resolved.path);
-      else onopen(resolved);
-    } catch (failure) {
-      onerror((failure as Error).message);
-    }
+  function open(entry: FileEntry) {
+    if (entry.type === 'directory' || entry.link_target_type === 'directory') {
+      void load(entry.path, 'push', index, entry.type !== 'directory');
+    } else onopen(entry);
   }
   function context(event: MouseEvent) {
     const row = (event.target as Element).closest<HTMLElement>(
@@ -256,35 +297,34 @@
       selection = entries.some((e) => e.path === contextEntry!.path)
         ? [contextEntry.path]
         : [];
-    contextLink = null;
-    if (
-      contextItems.length === 1 &&
-      contextItems[0].type !== 'directory' &&
-      node.online
-    )
-      void inspectContextLink(contextItems[0].path);
   }
-  async function inspectContextLink(source: string) {
-    try {
-      const result = await fileJSON<FileLink>(
-        `nodes/${node.id}/links?${new URLSearchParams({ path: source })}`,
-        {},
-        await manager.session(),
+  function openLinkDialog(edit: boolean) {
+    const source = edit ? contextItems[0].path : undefined;
+    linkDialog = {
+      source,
+      directory: source ? parentPath(source, windows) : path,
+    };
+  }
+  async function loadLink(source: string, signal: AbortSignal) {
+    const link = await fileJSON<FileLink>(
+      `nodes/${node.id}/links?${new URLSearchParams({ path: source })}`,
+      { signal },
+      await manager.session(),
+    );
+    if (!signal.aborted && link.hard)
+      entries = entries.map((entry) =>
+        entry.path === source && !entry.link_kind
+          ? { ...entry, link_kind: 'hard' }
+          : entry,
       );
-      if (contextItems.length === 1 && contextItems[0].path === source) {
-        contextLink = result;
-        if (result.hard)
-          entries = entries.map((entry) =>
-            entry.path === source
-              ? { ...entry, link_kind: 'hard', link_target_type: 'file' }
-              : entry,
-          );
-      }
-    } catch (failure) {
-      onerror((failure as Error).message);
-    }
+    return link;
   }
-  async function saveLink(name: string, target: string, hard: boolean) {
+  async function saveLink(
+    name: string,
+    target: string,
+    hard: boolean,
+    link: FileLink | null,
+  ) {
     if (
       !name ||
       name === '.' ||
@@ -293,20 +333,19 @@
       (windows && name.includes('\\'))
     )
       throw new Error(t('invalidFileName'));
-    const request = linkDialog!;
     if (
-      request.link?.kind === 'shortcut' &&
+      link?.kind === 'shortcut' &&
       !hard &&
       !name.toLowerCase().endsWith('.lnk')
     )
       name += '.lnk';
-    const destination = remoteJoin(request.directory, name, windows);
+    const destination = remoteJoin(linkDialog!.directory, name, windows);
     const result = await fileJSON<{ path: string }>(
       `nodes/${node.id}/links`,
       {
-        method: request.link ? 'PUT' : 'POST',
+        method: link ? 'PUT' : 'POST',
         body: JSON.stringify({
-          path: request.link?.path || destination,
+          path: link?.path || destination,
           destination,
           target,
           hard,
@@ -314,17 +353,10 @@
       },
       await manager.session(),
     );
-    if (request.link && request.link.path !== result.path)
-      onrenamed(request.link.path, result.path);
-    refresh();
+    if (link && link.path !== result.path) onrenamed(link.path, result.path);
   }
   function refresh() {
     void load(path, 'refresh');
-  }
-  function preference() {
-    localStorage.setItem('probex.files-hidden', String(hidden));
-    localStorage.setItem('probex.file-columns', JSON.stringify(columns));
-    void load(path, 'filter');
   }
   async function copyPaths() {
     try {
@@ -361,7 +393,6 @@
             failures.push(`${entry.name}: ${(failure as Error).message}`);
           }
         onremoved(removed);
-        refresh();
         if (failures.length) onerror(failures.join('\n'));
       },
     });
@@ -371,7 +402,7 @@
       unsupported = contextItems.filter((e) => e.type !== 'file');
     if (unsupported.length)
       onrequestconfirm({
-        title: 'downloadFiles',
+        title: 'download',
         description: 'directoryDownloadHint',
         confirmLabel: 'close',
         detail: unsupported.map((e) => e.path).join('\n'),
@@ -409,7 +440,6 @@
         { method: 'POST', body: JSON.stringify({ path: destination }) },
         await manager.session(),
       );
-    refresh();
   }
   function setClipboard(cut: boolean) {
     clipboard.nodeID = node.id;
@@ -417,6 +447,7 @@
     clipboard.entries = contextItems.map((entry) => ({ ...entry }));
   }
   async function transfer(items: FileEntry[], target: FileEntry, cut: boolean) {
+    if (operating) return;
     operating = true;
     let destination: string;
     try {
@@ -452,7 +483,6 @@
         (entry) => !moved.includes(entry.path),
       );
     operating = false;
-    refresh();
     if (failures.length) onerror(failures.join('\n'));
   }
   function sorting(field: string) {
@@ -460,48 +490,88 @@
     sort = field;
     localStorage.setItem('probex.files-sort', sort);
     localStorage.setItem('probex.files-order', order);
-    void load(path, 'filter');
   }
-  async function upload(items: DataTransferItem[], target: FileEntry) {
+  async function uploadOperation(
+    action: (signal: AbortSignal) => Promise<void>,
+  ) {
+    if (operating) return;
+    const request = new AbortController();
+    uploadController = request;
+    operating = true;
     try {
-      const [{ files, directories }, destination] = await Promise.all([
+      await action(request.signal);
+    } catch (failure) {
+      if (!request.signal.aborted) onerror((failure as Error).message);
+      request.abort();
+    } finally {
+      operating = false;
+      uploadController = undefined;
+    }
+  }
+  async function startUpload(
+    plan: UploadPlan,
+    replace: boolean,
+    signal: AbortSignal,
+  ) {
+    await createUploadDirectories(node.id, plan, windows, signal);
+    signal.throwIfAborted();
+    const files = replace
+      ? plan.files
+      : plan.files.filter((file) => !file.overwrite);
+    if (files.length) await manager.enqueue(node, plan.target, files);
+  }
+  function prepareUpload(
+    selection: () => UploadSelection | Promise<UploadSelection>,
+  ) {
+    if (uploadPlan) return;
+    return uploadOperation(async (signal) => {
+      const picked = await selection();
+      if (!picked.files.length && !picked.directories.length) return;
+      if (!picked.target) throw new Error(t('chooseDirectory'));
+      const plan = await checkUpload(
+        node.id,
+        picked,
+        windows,
+        await manager.session(),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (plan.conflicts.length) uploadPlan = plan;
+      else await startUpload(plan, false, signal);
+    });
+  }
+  function upload(items: DataTransferItem[], target: FileEntry) {
+    return prepareUpload(async () => {
+      const [selected, destination] = await Promise.all([
         droppedFiles(items),
         resolveDirectory(target),
       ]);
-      await manager.enqueue(node, destination, files, directories);
-    } catch (failure) {
-      onerror((failure as Error).message);
-    }
+      return { ...selected, target: destination };
+    });
   }
   async function reconnect() {
+    if (reconnecting) return;
+    reconnecting = true;
     try {
       await manager.connect();
       await load(path, 'refresh');
     } catch (failure) {
       error = (failure as Error).message;
       serviceFailed = true;
+    } finally {
+      reconnecting = false;
     }
   }
   $effect(() => {
-    const uploaded = uploadRevision !== seenUploads;
-    seenUploads = uploadRevision;
-    if (active)
-      untrack(() => {
-        void load(path, uploaded && path ? 'refresh' : 'push');
-      });
+    if (!active) return;
+    if (!opened) {
+      opened = true;
+      untrack(() => void load(path));
+    }
     return () => {
+      if (busy) opened = false;
       controller?.abort();
-      clearTimeout(timer);
     };
-  });
-  $effect(() => {
-    if (!sentinel || !active) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting && cursor && !busy && !nextFailed)
-        void load(path, 'more');
-    });
-    observer.observe(sentinel);
-    return () => observer.disconnect();
   });
 </script>
 
@@ -511,7 +581,7 @@
       class="icon-button"
       aria-label={t('backDirectory')}
       title={t('backDirectory')}
-      disabled={busy || index <= 0 || !node.online}
+      disabled={index <= 0 || !node.online}
       onclick={() => load(history[index - 1], 'history', index - 1)}
     >
       <ArrowLeft size={15} />
@@ -519,14 +589,14 @@
       class="icon-button"
       aria-label={t('forwardDirectory')}
       title={t('forwardDirectory')}
-      disabled={busy || index >= history.length - 1 || !node.online}
+      disabled={index >= history.length - 1 || !node.online}
       onclick={() => load(history[index + 1], 'history', index + 1)}
     >
       <ArrowRight size={15} />
     </button><button
       class="icon-button"
-      aria-label={t('refreshFiles')}
-      title={t('refreshFiles')}
+      aria-label={t('refresh')}
+      title={t('refresh')}
       disabled={busy || !node.online}
       onclick={refresh}
     >
@@ -535,6 +605,7 @@
     <form
       onsubmit={(e) => {
         e.preventDefault();
+        if (!node.online) return;
         void load(address);
       }}
     >
@@ -542,15 +613,16 @@
         aria-label={t('directoryAddress')}
         bind:value={address}
         placeholder={windows ? t('drives') : '/'}
-        disabled={busy || !node.online}
+        disabled={!node.online}
       />
     </form>
     <SearchPopover
       label={t('searchFiles')}
       bind:value={query}
       onquery={() => {
-        clearTimeout(timer);
-        timer = setTimeout(() => void load(path, 'filter'), 250);
+        selection = [];
+        anchor = '';
+        contextEntry = null;
       }}
     />
     <DropdownMenu.Root>
@@ -567,7 +639,8 @@
             checked={hidden}
             onCheckedChange={(value) => {
               hidden = value;
-              preference();
+              localStorage.setItem('probex.files-hidden', String(hidden));
+              refresh();
             }}
           >
             <span class="check-slot">
@@ -583,7 +656,10 @@
                 columns = value
                   ? [...columns, key]
                   : columns.filter((c) => c !== key);
-                preference();
+                localStorage.setItem(
+                  'probex.file-columns',
+                  JSON.stringify(columns),
+                );
               }}
             >
               <span class="check-slot">
@@ -593,17 +669,29 @@
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+    {#if busy || loadingFiles || reconnecting}
+      <div
+        class="file-navigation-progress"
+        role="progressbar"
+        aria-label={t('loading')}
+      >
+        <span></span>
+      </div>
+    {/if}
   </div>
   {#if serviceFailed || !node.online}<div
       class="file-service-error"
       role="alert"
     >
       <CircleAlert size={22} /><strong>{t('fileServiceFailed')}</strong>
-      <button class="quiet-button" disabled={busy} onclick={reconnect}>
-        {t('reconnectFiles')}
+      <button
+        class="quiet-button"
+        disabled={busy || reconnecting}
+        onclick={reconnect}
+      >
+        {#if reconnecting}<PendingLabel />{:else}{t('reconnect')}{/if}
       </button>
-      {#if error}<small>{error}</small>{/if}
-    </div>{:else if error}<p class="file-error" role="alert">{error}</p>{/if}
+    </div>{/if}
   <ContextMenu.Root>
     <ContextMenu.Trigger class="files-context" oncontextmenu={context}>
       <div
@@ -618,7 +706,7 @@
         }}
       >
         <FileList
-          {entries}
+          entries={visibleEntries}
           {path}
           {windows}
           nodeID={node.id}
@@ -634,17 +722,9 @@
             void transfer(items, destination, true)}
           onupload={upload}
         />
-        {#if !entries.length && !busy}<div class="file-empty">
+        {#if !visibleEntries.length && !busy && !error}<div class="file-empty">
             {t('emptyDirectory')}
           </div>{/if}
-        <div class="files-sentinel" bind:this={sentinel}>
-          {#if busy}<span>{t('loading')}</span>{:else if cursor}<button
-              class="quiet-button"
-              onclick={() => load(path, 'more')}
-            >
-              {t(nextFailed ? 'retryLoad' : 'loadMoreFiles')}
-            </button>{/if}
-        </div>
       </div>
     </ContextMenu.Trigger>
     <FileActions
@@ -652,19 +732,17 @@
       online={node.online && !operating}
       directory={!!path}
       canPaste={clipboard.nodeID === node.id && clipboard.entries.length > 0}
-      canEditLink={contextItems.length === 1 && !!contextLink?.kind}
-      onlink={(edit) =>
-        (linkDialog = {
-          link: edit ? contextLink : null,
-          directory: edit ? parentPath(contextItems[0].path, windows) : path,
-        })}
+      canEditLink={contextItems.length === 1 &&
+        (!!contextItems[0].link_kind ||
+          (windows && contextItems[0].type === 'file'))}
+      onlink={openLinkDialog}
       onopen={() => open(contextItems[0])}
       oncut={() => setClipboard(true)}
       oncopy={() => setClipboard(false)}
       onpaste={() =>
         void transfer([...clipboard.entries], target, clipboard.cut)}
       onnew={(kind) => (dialog = { kind, target: path })}
-      onupload={(kind) => onupload(path, kind)}
+      onupload={(kind) => uploadPicker.choose(path, kind)}
       onrename={() =>
         (dialog = {
           kind: 'rename',
@@ -676,17 +754,49 @@
       ondelete={removeFiles}
     />
   </ContextMenu.Root>
+  {#if error}<div class="file-error" role="alert">
+      <CircleAlert size={14} aria-hidden="true" />
+      <span>{t('directoryLoadFailed')} · {error}</span>
+      {#if retryMode}
+        <button class="quiet-button" onclick={() => load(path, retryMode!)}>
+          {t('retryLoad')}
+        </button>
+      {/if}
+    </div>{/if}
   <footer class="file-counts">
     {t('totalEntries')}
-    {directories + files} · {t('totalDirectories')}
-    {directories} · {t('totalFiles')}
-    {files}
-    {#if selection.length}<span>
+    {visibleDirectories + visibleFiles} · {t('totalDirectories')}
+    {visibleDirectories} · {t('totalFiles')}
+    {visibleFiles}
+    {#if cursor}<span role="status">
+        {t('directoryEntriesLoaded')}
+        {entries.length} / {directories + files}
+      </span>{/if}
+    {#if operating}<span class="file-operation-status" role="status">
+        <PendingLabel />
+      </span>{/if}
+    {#if selected.length}<span>
         {t('selectedFiles')}
-        {selection.length}
+        {selected.length}
       </span>{/if}
   </footer>
 </div>
+<UploadPicker
+  bind:this={uploadPicker}
+  onselect={(target, files) =>
+    void prepareUpload(() => ({ target, files, directories: [] }))}
+/>
+{#if uploadPlan}
+  <UploadConflictDialog
+    plan={uploadPlan}
+    onclose={() => (uploadPlan = null)}
+    onchoose={(replace) => {
+      const plan = uploadPlan!;
+      uploadPlan = null;
+      void uploadOperation((signal) => startUpload(plan, replace, signal));
+    }}
+  />
+{/if}
 {#if dialog}<FileNameDialog
     title={dialog.kind}
     initial={dialog.entry?.name || ''}
@@ -695,9 +805,10 @@
     onclose={() => (dialog = null)}
   />{/if}
 {#if linkDialog}<FileLinkDialog
-    link={linkDialog.link}
+    source={linkDialog.source}
     directory={linkDialog.directory}
     {windows}
+    onload={loadLink}
     onsave={saveLink}
     onclose={() => (linkDialog = null)}
   />{/if}

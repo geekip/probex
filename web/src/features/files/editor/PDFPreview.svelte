@@ -1,5 +1,5 @@
 <script lang="ts">
-  import EditorNotice from './EditorNotice.svelte';
+  import FileLoadFeedback from './FileLoadFeedback.svelte';
   import { onMount } from 'svelte';
   import { ChevronLeft, ChevronRight, Minus, Plus } from '@lucide/svelte';
   import type {
@@ -13,16 +13,19 @@
     active,
     revision,
     onerror,
+    onreload,
+    loading = $bindable(true),
   }: {
     source: string;
     active: boolean;
     revision: number;
     onerror: (message: string) => void;
+    onreload: () => void;
+    loading?: boolean;
   } = $props();
   let document = $state.raw<PDFDocumentProxy>(),
     page = $state(1),
     zoom = $state(1),
-    loading = $state(false),
     error = $state(''),
     width = $state(0);
   let container = $state<HTMLDivElement>(),
@@ -126,7 +129,7 @@
 </script>
 
 <div class="pdf-preview">
-  <div class="pdf-controls">
+  <div class="pdf-controls" hidden={loading || !!error}>
     <button
       class="icon-button"
       aria-label={t('previousPage')}
@@ -161,14 +164,12 @@
       <Plus size={14} />
     </button>
   </div>
-  <div class="editor-notices">
-    {#if loading}<EditorNotice message={t('loading')} />{/if}
-    {#if error}<EditorNotice
-        message={error + ' · ' + t('pdfLoadError')}
-        tone="error"
-      />{/if}
-  </div>
-  <div class="pdf-canvas-scroll" bind:this={container}>
+  {#if loading || error}<FileLoadFeedback {error} onretry={onreload} />{/if}
+  <div
+    class="pdf-canvas-scroll"
+    bind:this={container}
+    hidden={loading || !!error}
+  >
     <canvas bind:this={canvas} aria-label={t('pdfPage')}></canvas>
   </div>
 </div>

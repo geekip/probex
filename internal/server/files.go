@@ -22,6 +22,7 @@ import (
 )
 
 type fileOwner struct {
+	notices     chan fileEvent
 	id, session string
 	conn        *websocket.Conn
 	ctx         context.Context
@@ -38,6 +39,7 @@ type fileTask struct {
 	error    string
 }
 type fileEvent struct {
+	Topic    string        `json:"topic,omitempty"`
 	Download *download     `json:"download,omitempty"`
 	Type     string        `json:"type"`
 	ID       string        `json:"id,omitempty"`
@@ -120,7 +122,7 @@ func (s *Server) fileSession(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(protocol.MaxMessage)
-	owner := &fileOwner{id: protocol.RandomID(), session: sessionID, conn: conn, ctx: ctx, cancel: cancel, nodes: map[string]bool{}}
+	owner := &fileOwner{id: protocol.RandomID(), session: sessionID, conn: conn, ctx: ctx, cancel: cancel, nodes: map[string]bool{}, notices: make(chan fileEvent, 64)}
 	s.mu.Lock()
 	if s.closed || ctx.Err() != nil || sessionID != "" && !s.sessions[sessionID].After(time.Now()) {
 		s.mu.Unlock()
@@ -131,6 +133,7 @@ func (s *Server) fileSession(w http.ResponseWriter, r *http.Request) {
 	s.filesMu.Unlock()
 	s.mu.Unlock()
 	defer s.endFileOwner(owner)
+	defer s.unsubscribeUpdate(owner, updateScope{})
 	stop := context.AfterFunc(ctx, func() { conn.CloseNow() })
 	defer stop()
 	if err := s.fileEvent(owner, fileEvent{Type: "session", ID: owner.id}); err != nil {
@@ -143,6 +146,11 @@ func (s *Server) fileSession(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ctx.Done():
 				return
+			case event := <-owner.notices:
+				if err := s.fileEvent(owner, event); err != nil {
+					cancel()
+					return
+				}
 			case <-ticker.C:
 				ping, done := context.WithTimeout(ctx, 10*time.Second)
 				err := conn.Ping(ping)
@@ -155,11 +163,17 @@ func (s *Server) fileSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	for {
-		var m protocol.Message
+		var m updateRequest
 		if err := wsjson.Read(ctx, conn, &m); err != nil {
 			return
 		}
-		if m.Type != "ping" {
+		switch {
+		case m.Type == "ping":
+		case m.Type == "subscribe" && s.validUpdateScope(m.updateScope):
+			s.subscribeUpdate(owner, m.updateScope)
+		case m.Type == "unsubscribe" && s.validUpdateScope(m.updateScope):
+			s.unsubscribeUpdate(owner, m.updateScope)
+		default:
 			conn.Close(websocket.StatusPolicyViolation, "invalid file session message")
 			return
 		}

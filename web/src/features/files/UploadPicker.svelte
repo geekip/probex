@@ -1,15 +1,12 @@
 <script lang="ts">
-  import type { Node } from '@/features/nodes/types';
-  import type { Transfers } from './store.svelte';
-  let { manager }: { manager: Transfers } = $props();
+  import type { PickedFile } from '@/features/transfers/store.svelte';
+  let {
+    onselect,
+  }: { onselect: (target: string, files: PickedFile[]) => void } = $props();
   let files: HTMLInputElement, folders: HTMLInputElement;
-  let destination: { node: Node; target: string };
-  export function choose(
-    node: Node,
-    target: string,
-    kind: 'files' | 'folder' = 'files',
-  ) {
-    destination = { node, target };
+  let destination: string;
+  export function choose(target: string, kind: 'files' | 'folder' = 'files') {
+    destination = target;
     (kind === 'folder' ? folders : files).click();
   }
   function selected(event: Event) {
@@ -18,9 +15,8 @@
       file,
       relative: file.webkitRelativePath || file.name,
     }));
-    if (picked.length)
-      void manager.enqueue(destination.node, destination.target, picked);
     input.value = '';
+    if (picked.length) onselect(destination, picked);
   }
 </script>
 

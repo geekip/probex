@@ -33,13 +33,18 @@ type fixture struct {
 
 func newFixture(t *testing.T, allowRegistration bool) *fixture {
 	t.Helper()
+	return newFixtureWithConfig(t, server.Config{AllowRegistration: allowRegistration})
+}
+func newFixtureWithConfig(t *testing.T, config server.Config) *fixture {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := server.OpenStore(filepath.Join(dir, "server.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := &fixture{t: t, store: store, admin: protocol.RandomID(), state: filepath.Join(dir, "node.json")}
-	f.app, err = server.New(store, server.Config{AdminToken: f.admin, AllowRegistration: allowRegistration})
+	config.AdminToken = f.admin
+	f.app, err = server.New(store, config)
 	if err != nil {
 		t.Fatal(err)
 	}

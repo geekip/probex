@@ -2,6 +2,8 @@
   import type { OpenedFile } from '@/features/files/editor/FileWindow.svelte';
   import type { Transfers } from '@/features/transfers/store.svelte';
   import EditorNotice from './EditorNotice.svelte';
+  import FileLoadFeedback from './FileLoadFeedback.svelte';
+  import PDFPreview from './PDFPreview.svelte';
   import { t } from '@/shared/settings.svelte';
   let {
     file,
@@ -15,6 +17,7 @@
     onerror: (message: string) => void;
   } = $props();
   let error = $state(''),
+    loading = $state(true),
     generation = $state(0),
     media = $state<HTMLMediaElement>(),
     time = 0;
@@ -25,12 +28,20 @@
   );
   export function reload() {
     error = '';
+    loading = true;
     generation++;
   }
-  function failed() {
-    if (active) error = t('mediaLoadError');
+  function failed(message = t('mediaLoadError')) {
+    if (!active) return;
+    error = message;
+    loading = false;
   }
   $effect.pre(() => {
+    generation;
+    if (active && file.kind !== 'pdf') {
+      loading = true;
+      error = '';
+    }
     if (!active && media) {
       time = media.currentTime;
       media.pause();
@@ -38,9 +49,20 @@
       media.load();
     }
   });
+  $effect(() => {
+    if (active && !source)
+      void manager
+        .session()
+        .catch((failure) => failed((failure as Error).message));
+    generation;
+  });
+  $effect(() => {
+    file.loading = active && loading;
+  });
   function restore() {
     if (media && time && Number.isFinite(media.duration))
       media.currentTime = Math.min(time, media.duration);
+    loading = false;
   }
 </script>
 
@@ -50,29 +72,31 @@
         message={t('nodeOffline')}
         tone="warning"
       />{/if}
-    {#if !source}<EditorNotice
-        message={t('fileSessionEnded')}
-        tone="error"
-      />{/if}
-    {#if error}<EditorNotice message={error} tone="error" />{/if}
   </div>
-  {#if file.kind === 'pdf'}{#await import('@/features/files/editor/PDFPreview.svelte')}<EditorNotice
-        message={t('loading')}
-      />{:then pdf}<pdf.default
-        {source}
-        active={active && !!source}
-        revision={generation}
-        {onerror}
-      />{:catch failure}<EditorNotice
-        message={failure.message}
-        tone="error"
-      />{/await}
-  {:else}<div class="media-preview-stage">
+  {#if !source}
+    <FileLoadFeedback {error} onretry={reload} disabled={!file.node.online} />
+  {:else if file.kind === 'pdf'}
+    <PDFPreview
+      {source}
+      {active}
+      revision={generation}
+      {onerror}
+      onreload={reload}
+      bind:loading
+    />
+  {:else}
+    {#if loading || error}<FileLoadFeedback
+        {error}
+        onretry={reload}
+        disabled={!file.node.online}
+      />{/if}
+    <div class="media-preview-stage" hidden={loading || !!error}>
       {#key generation}
         {#if file.kind === 'image'}{#if active && source}<img
               src={source}
               alt={file.entry.name}
-              onerror={failed}
+              onload={() => (loading = false)}
+              onerror={() => failed()}
             />{/if}
         {:else if file.kind === 'audio'}<!-- svelte-ignore a11y_media_has_caption (Caption tracks are not supplied by remote files.) --><audio
             controls
@@ -80,7 +104,7 @@
             src={active && source ? source : undefined}
             bind:this={media}
             onloadedmetadata={restore}
-            onerror={failed}
+            onerror={() => failed()}
           >
             {t('mediaLoadError')}
           </audio>
@@ -90,7 +114,7 @@
             src={active && source ? source : undefined}
             bind:this={media}
             onloadedmetadata={restore}
-            onerror={failed}
+            onerror={() => failed()}
           >
             {t('mediaLoadError')}
           </video>{/if}

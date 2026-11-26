@@ -1,33 +1,71 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
+  import { LoaderCircle } from '@lucide/svelte';
+  import { onMount } from 'svelte';
   import { Dialog, Switch } from 'bits-ui';
   import type { FileLink } from './api';
   import { t } from '@/shared/settings.svelte';
   let {
-    link,
+    source,
     directory,
     windows,
+    onload,
     onsave,
     onclose,
   }: {
-    link: FileLink | null;
+    source?: string;
     directory: string;
     windows: boolean;
-    onsave: (name: string, target: string, hard: boolean) => Promise<void>;
+    onload: (source: string, signal: AbortSignal) => Promise<FileLink>;
+    onsave: (
+      name: string,
+      target: string,
+      hard: boolean,
+      link: FileLink | null,
+    ) => Promise<void>;
     onclose: () => void;
   } = $props();
   let open = $state(true),
-    name = $state(untrack(() => link?.name || '')),
-    target = $state(untrack(() => link?.target || '')),
-    hard = $state(untrack(() => link?.hard || false)),
+    link = $state<FileLink | null>(null),
+    name = $state(''),
+    target = $state(''),
+    hard = $state(false),
     busy = $state(false),
     error = $state('');
+  const loading = $derived(!!source && !link && !error);
+  const disabled = $derived(busy || (!!source && !link));
+
+  async function load(path: string, signal: AbortSignal) {
+    try {
+      const result = await onload(path, signal);
+      if (signal.aborted) return;
+      if (!result.kind) {
+        error = t('notFileLink');
+        return;
+      }
+      name = result.name;
+      target = result.target;
+      hard = result.hard;
+      link = result;
+    } catch (failure) {
+      if (!signal.aborted) error = (failure as Error).message;
+    }
+  }
+
+  onMount(() => {
+    if (!source) return;
+    const request = new AbortController();
+    void load(source, request.signal);
+    return () => request.abort();
+  });
+
   async function save(event: SubmitEvent) {
     event.preventDefault();
+    if (disabled) return;
     busy = true;
     error = '';
     try {
-      await onsave(name, target, hard);
+      await onsave(name, target, hard, link);
       onclose();
     } catch (failure) {
       error = (failure as Error).message;
@@ -47,6 +85,7 @@
     <Dialog.Overlay class="dialog-overlay" />
     <Dialog.Content
       class="join-dialog rename-dialog"
+      aria-busy={busy}
       onInteractOutside={(event) => {
         if (busy) event.preventDefault();
       }}
@@ -57,7 +96,7 @@
       <div class="dialog-heading">
         <div>
           <Dialog.Title class="dialog-title">
-            {t(link ? 'editLink' : 'createLink')}
+            {t(source ? 'editLink' : 'createLink')}
           </Dialog.Title>
           <Dialog.Description class="dialog-description">
             {directory}
@@ -65,44 +104,52 @@
         </div>
       </div>
       <form class="join-content" onsubmit={save}>
-        <label for="link-name">{t('linkName')}</label>
-        <input
-          id="link-name"
-          bind:value={name}
-          required
-          disabled={busy}
-          autocomplete="off"
-        />
-        <label for="link-target">{t('linkTarget')}</label>
-        <input
-          id="link-target"
-          bind:value={target}
-          required={!(link?.hard && hard)}
-          disabled={busy}
-          autocomplete="off"
-        />
-        <div class="link-switch-row">
-          <label for="link-hard">{t('hardLink')}</label>
-          <Switch.Root
-            id="link-hard"
-            class="link-switch"
-            bind:checked={hard}
-            disabled={busy}
-          >
-            <Switch.Thumb class="link-switch-thumb" />
-          </Switch.Root>
+        <div class="link-dialog-fields">
+          <label for="link-name">{t('linkName')}</label>
+          <input
+            id="link-name"
+            bind:value={name}
+            required
+            {disabled}
+            autocomplete="off"
+          />
+          <label for="link-target">{t('linkTarget')}</label>
+          <input
+            id="link-target"
+            bind:value={target}
+            required={!(link?.hard && hard)}
+            {disabled}
+            autocomplete="off"
+          />
+          <div class="link-switch-row">
+            <label for="link-hard">{t('hardLink')}</label>
+            <Switch.Root
+              id="link-hard"
+              class="link-switch"
+              bind:checked={hard}
+              {disabled}
+            >
+              <Switch.Thumb class="link-switch-thumb" />
+            </Switch.Root>
+          </div>
+          <p class="dialog-description">
+            {t(
+              hard
+                ? link?.hard
+                  ? 'editHardLinkHint'
+                  : 'hardLinkHint'
+                : windows
+                  ? 'windowsLinkHint'
+                  : 'symbolicLinkHint',
+            )}
+          </p>
+          {#if loading}
+            <div class="link-loading-layer" role="status">
+              <LoaderCircle class="spin" size={18} aria-hidden="true" />
+              {t('loading')}
+            </div>
+          {/if}
         </div>
-        <p class="dialog-description">
-          {t(
-            hard
-              ? link?.hard
-                ? 'editHardLinkHint'
-                : 'hardLinkHint'
-              : windows
-                ? 'windowsLinkHint'
-                : 'symbolicLinkHint',
-          )}
-        </p>
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
         <div class="dialog-actions">
           <button
@@ -113,8 +160,8 @@
           >
             {t('cancel')}
           </button>
-          <button class="primary-button" disabled={busy}>
-            {t(busy ? 'processing' : 'save')}
+          <button class="primary-button" {disabled}>
+            {#if busy}<PendingLabel />{:else}{t('save')}{/if}
           </button>
         </div>
       </form>
@@ -123,6 +170,19 @@
 </Dialog.Root>
 
 <style>
+  .link-dialog-fields {
+    position: relative;
+  }
+  .link-loading-layer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--surface);
+    color: var(--muted);
+  }
   .link-switch-row {
     display: flex;
     align-items: center;

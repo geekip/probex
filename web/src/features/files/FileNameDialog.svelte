@@ -1,6 +1,8 @@
 <script lang="ts">
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import { untrack } from 'svelte';
   import { Dialog } from 'bits-ui';
+  import { FileError } from './api';
   import { t } from '@/shared/settings.svelte';
   let {
     title,
@@ -21,13 +23,17 @@
     error = $state('');
   async function save(event: SubmitEvent) {
     event.preventDefault();
+    if (busy) return;
     busy = true;
     error = '';
     try {
       await onsave(name);
       onclose();
     } catch (failure) {
-      error = (failure as Error).message;
+      error =
+        failure instanceof FileError && failure.code === 'exists'
+          ? t('fileNameExists')
+          : (failure as Error).message;
     } finally {
       busy = false;
     }
@@ -43,6 +49,7 @@
   <Dialog.Portal>
     <Dialog.Overlay class="dialog-overlay" /><Dialog.Content
       class="join-dialog rename-dialog"
+      aria-busy={busy}
       onInteractOutside={(e) => {
         if (busy) e.preventDefault();
       }}
@@ -76,7 +83,7 @@
           >
             {t('cancel')}
           </button><button class="primary-button" disabled={busy}>
-            {t(busy ? 'processing' : 'save')}
+            {#if busy}<PendingLabel />{:else}{t('save')}{/if}
           </button>
         </div>
       </form>

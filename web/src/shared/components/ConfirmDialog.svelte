@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import { AlertDialog } from 'bits-ui';
   import { t } from '@/shared/settings.svelte';
 
@@ -22,6 +23,7 @@
   let error = $state('');
 
   async function runAction() {
+    if (busy) return;
     busy = true;
     error = '';
     try {
@@ -69,7 +71,7 @@
           disabled={busy}
           onclick={runAction}
         >
-          {t(busy ? 'processing' : request.confirmLabel)}
+          {#if busy}<PendingLabel />{:else}{t(request.confirmLabel)}{/if}
         </button>
       </div>
     </AlertDialog.Content>

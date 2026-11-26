@@ -168,8 +168,12 @@ func entry(path string, info fs.FileInfo, fields string) Entry {
 	e := Entry{Name: info.Name(), Path: path, Type: kind(info)}
 	if e.Type == "symlink" {
 		e.LinkKind = "symlink"
-	} else if e.Type == "file" && isShortcut(path) {
-		e.LinkKind = "shortcut"
+	} else if e.Type == "file" {
+		if isShortcut(path) {
+			e.LinkKind = "shortcut"
+		} else if hardLinksFromInfo(info) > 1 {
+			e.LinkKind = "hard"
+		}
 	}
 	wanted := "," + fields + ","
 	has := func(name string) bool { return strings.Contains(wanted, ","+name+",") }

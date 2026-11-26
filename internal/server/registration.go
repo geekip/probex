@@ -97,6 +97,9 @@ func (s *Server) registration(w http.ResponseWriter, r *http.Request) {
 	if n.Admission == "rejected" || n.Admission == "deleted" {
 		status = http.StatusForbidden
 	}
+	if r.Method == http.MethodPost && id == "" {
+		s.publishUpdate("nodes", n.ID, "")
+	}
 	writeJSON(w, status, n.Node)
 }
 
@@ -118,6 +121,7 @@ func (s *Server) reviewNode(w http.ResponseWriter, r *http.Request, id, action s
 		return
 	}
 	n.SetStatus(false)
+	s.publishUpdate("nodes", id, "")
 	writeJSON(w, http.StatusOK, n.Node)
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Dialog } from 'bits-ui';
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import { KeyRound, Copy, Check, Plus } from '@lucide/svelte';
   import copyText from 'clipboard-copy';
   import { api } from '@/shared/api';
@@ -8,12 +9,10 @@
   let {
     node,
     onclose,
-    oncreated,
     onerror,
   }: {
     node?: Node;
     onclose: () => void;
-    oncreated: () => void;
     onerror: (message: string) => void;
   } = $props();
   let open = $state(true);
@@ -39,13 +38,13 @@
   }
   async function create(event: SubmitEvent) {
     event.preventDefault();
+    if (busy) return;
     busy = true;
     try {
       enrollment = await api<Enrollment>(
         node ? `nodes/${node.id}/enrollment` : 'nodes',
         { method: 'POST', body: JSON.stringify(node ? {} : { name }) },
       );
-      oncreated();
     } catch (error) {
       onerror((error as Error).message);
     } finally {
@@ -79,6 +78,13 @@
   <Dialog.Portal>
     <Dialog.Overlay class="dialog-overlay" /><Dialog.Content
       class="join-dialog"
+      aria-busy={busy}
+      onEscapeKeydown={(event) => {
+        if (busy) event.preventDefault();
+      }}
+      onInteractOutside={(event) => {
+        if (busy) event.preventDefault();
+      }}
     >
       <div class="dialog-heading">
         <div>
@@ -97,7 +103,7 @@
               id="new-node-name"
               value={node ? node.name : name}
               oninput={(event) => (name = event.currentTarget.value)}
-              disabled={!!node}
+              disabled={busy || !!node}
               required
               maxlength="64"
               placeholder="node1"
@@ -108,9 +114,11 @@
                 {t('cancel')}
               </Dialog.Close>
               <button class="primary-button" disabled={busy}>
-                {#if node}<KeyRound size={15} />{:else}<Plus
-                    size={15}
-                  />{/if}{t(node ? 'regenerate' : 'create')}
+                {#if busy}<PendingLabel />{:else}
+                  {#if node}<KeyRound size={15} />{:else}<Plus
+                      size={15}
+                    />{/if}{t(node ? 'regenerate' : 'create')}
+                {/if}
               </button>
             </div>
           </form>

@@ -189,6 +189,7 @@ func (s *Server) startForward(f Forward, sockets forwardSockets, bindErr error) 
 					s.forwardsMu.Lock()
 					run.listenError = err.Error()
 					s.forwardsMu.Unlock()
+					s.publishUpdate("forwards", run.config.NodeID, run.config.ID)
 				}
 				return
 			}
@@ -202,12 +203,7 @@ func (s *Server) forwardTCP(run *forwardRuntime, conn *net.TCPConn) {
 	stop := context.AfterFunc(run.ctx, func() { conn.Close() })
 	defer stop()
 	stream, err := s.openStream(run.ctx, run.config.NodeID, protocol.Message{Purpose: "tcp", Target: net.JoinHostPort(run.config.TargetHost, strconv.Itoa(run.config.TargetPort))})
-	s.forwardsMu.Lock()
-	run.lastError = ""
-	if err != nil {
-		run.lastError = err.Error()
-	}
-	s.forwardsMu.Unlock()
+	s.setForwardError(run, err)
 	if err != nil {
 		return
 	}
@@ -396,6 +392,7 @@ func (s *Server) forwardAPI(w http.ResponseWriter, r *http.Request, path string)
 			return
 		}
 		if previous != nil && previous.listenError == "" && previous.config.Protocol == f.Protocol && previous.config.ListenAddr == f.ListenAddr && previous.config.TargetHost == f.TargetHost && previous.config.TargetPort == f.TargetPort {
+			s.publishUpdate("forwards", f.NodeID, f.ID)
 			writeJSON(w, status, s.forwardStatus(f))
 			return
 		}
@@ -406,6 +403,7 @@ func (s *Server) forwardAPI(w http.ResponseWriter, r *http.Request, path string)
 		}
 		s.forwardsMu.Lock()
 		s.startForward(f, sockets, nil)
+		s.publishUpdate("forwards", f.NodeID, f.ID)
 		writeJSON(w, status, s.forwardStatus(f))
 		return
 	}
@@ -434,6 +432,7 @@ func (s *Server) forwardAPI(w http.ResponseWriter, r *http.Request, path string)
 		}
 		if run != nil {
 			run.stop(forwardSockets{})
+			s.publishUpdate("forwards", run.config.NodeID, id)
 		}
 		writeJSON(w, 200, map[string]bool{"ok": true})
 		return

@@ -74,12 +74,39 @@
   font-size: 12px;
 }
 .file-navigation {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
   padding: 6px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
+}
+.file-navigation-progress {
+  position: absolute;
+  z-index: 2;
+  inset: auto 0 -1px;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.file-navigation-progress span {
+  display: block;
+  width: 35%;
+  height: 100%;
+  background: var(--accent);
+  animation: file-navigation-progress 1.2s ease-in-out infinite alternate;
+}
+@keyframes file-navigation-progress {
+  to {
+    transform: translateX(185%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .file-navigation-progress span {
+    width: 100%;
+    animation: none;
+  }
 }
 .file-navigation .icon-button {
   width: 23px;
@@ -99,6 +126,10 @@
   padding: 5px;
 }
 .file-error {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  flex-shrink: 0;
   margin: 0;
   padding: 7px 10px;
   font-size: 11px;
@@ -108,6 +139,9 @@
   color: var(--error);
   max-height: 100px;
   overflow-y: auto;
+}
+.file-error svg {
+  flex-shrink: 0;
 }
 .file-entry {
   display: flex;
@@ -140,16 +174,11 @@
   color: var(--muted);
   font-size: 11px;
 }
-.file-empty,
-.files-sentinel {
+.file-empty {
   padding: 16px 10px;
   text-align: center;
   color: var(--muted);
   font-size: 12px;
-}
-.files-sentinel {
-  min-height: 1px;
-  padding: 4px;
 }
 @media (max-width: 900px) {
   .file-browser {
@@ -165,6 +194,11 @@
 }
 .file-counts span {
   margin-left: auto;
+}
+.file-operation-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .file-sort {
   display: flex;
@@ -202,5 +236,30 @@
 .file-service-error small {
   max-width: 100%;
   overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.upload-conflict-target,
+.upload-conflict-list {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.upload-conflict-target {
+  margin-top: 8px;
+  color: var(--muted);
+}
+.upload-conflict-list {
+  margin-top: 8px;
+  padding: 8px 10px;
+  max-height: min(220px, 32dvh);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  list-style: none;
+}
+.upload-conflict-list li {
+  padding: 4px 0;
+}
+.upload-conflict-list small {
+  margin-inline-start: 6px;
   color: var(--muted);
 }

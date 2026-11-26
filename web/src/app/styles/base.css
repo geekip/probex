@@ -173,6 +173,19 @@ a {
 .primary-button:hover {
   background: color-mix(in srgb, var(--accent) 88%, var(--surface));
 }
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
 :root[data-theme='dark'] .primary-button:not(.danger-button) {
   color: var(--text);
   background: #2b2b2b;
@@ -273,6 +286,10 @@ td {
   margin: 0;
   overflow-wrap: anywhere;
 }
+.window-drag-area {
+  cursor: move;
+  touch-action: none;
+}
 .dialog-description {
   margin-top: 8px;
   font-size: 13px;
@@ -356,11 +373,6 @@ td {
 .inline-error {
   font-size: 12px;
   margin-top: 8px;
-}
-@keyframes pulse {
-  to {
-    opacity: 0.3;
-  }
 }
 @media (max-width: 768px) {
   th,

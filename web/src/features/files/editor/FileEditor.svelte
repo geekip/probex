@@ -8,6 +8,8 @@
   import { LanguageDescription } from '@codemirror/language';
   import { languages } from '@codemirror/language-data';
   import EditorNotice from './EditorNotice.svelte';
+  import FileLoadFeedback from './FileLoadFeedback.svelte';
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import { FileError, fileJSON } from '@/features/files/api';
   import type { OpenedFile } from '@/features/files/editor/FileWindow.svelte';
   import type { Confirmation } from '@/shared/components/ConfirmDialog.svelte';
@@ -36,7 +38,7 @@
     active,
     manager,
     onrequestconfirm,
-    onready,
+    onerror,
     showLineNumbers,
     wrapLines,
     fontSize,
@@ -45,7 +47,7 @@
     active: boolean;
     manager: Transfers;
     onrequestconfirm: (request: Confirmation) => void;
-    onready: () => void;
+    onerror: (message: string) => void;
     showLineNumbers: boolean;
     wrapLines: boolean;
     fontSize: number;
@@ -54,9 +56,10 @@
   let view: EditorView | undefined;
   let savedState: EditorState;
   let document = $state<TextDocument>(),
-    loading = $state(true),
+    loadError = $state(''),
     error = $state(''),
-    conflict = $state(false);
+    conflict = $state(false),
+    hasLongLines = $state(false);
   let encoding = $state<'utf-8' | 'gbk'>('utf-8'),
     bom = $state(false),
     separator = $state('LF'),
@@ -70,18 +73,20 @@
     wrapping = new Compartment();
   const readonly = $derived(document?.readonly ?? true);
   export function status() {
-    const editable = !!document && !readonly && !loading && !file.saving;
+    const editable =
+      !!document && !readonly && !file.loading && !file.saving && !loadError;
     return {
       encoding,
       bom,
       separator,
       line,
-      loaded: !!document,
+      loaded: !!document && !file.loading && !loadError,
       readonly: document?.readonly ?? false,
       canEdit: editable,
+      canWrap: !hasLongLines,
       canSave:
         editable && file.node.online && !file.missing && !file.nodeMissing,
-      canReload: !loading && !file.saving && file.node.online,
+      canReload: !file.loading && !file.saving && file.node.online,
     };
   }
   export function search() {
@@ -180,7 +185,8 @@
     controller?.abort();
     const request = new AbortController();
     controller = request;
-    loading = true;
+    file.loading = true;
+    loadError = '';
     view?.dispatch({ effects: input.reconfigure(inputMode(true)) });
     error = '';
     conflict = false;
@@ -204,11 +210,14 @@
       file.entry.size = next.size;
       file.dirty = false;
       const source = editorDocument(next.text);
+      hasLongLines = source.hasLongLines;
       const state = EditorState.create({
         doc: source.doc,
         extensions: [
           basicSetup,
-          wrapping.of(wrapLines ? EditorView.lineWrapping : []),
+          wrapping.of(
+            wrapLines && !hasLongLines ? EditorView.lineWrapping : [],
+          ),
           source.extensions,
           theme.of(editorTheme()),
           syntax.of([]),
@@ -224,7 +233,8 @@
               run: () => {
                 if (
                   !readonly &&
-                  !loading &&
+                  !file.loading &&
+                  !loadError &&
                   !file.missing &&
                   !file.nodeMissing &&
                   !file.saving &&
@@ -260,11 +270,17 @@
         languages,
         file.entry.name,
       );
-      if (language) {
-        const support = await language.load();
-        if (!disposed && view === created)
-          view.dispatch({ effects: syntax.reconfigure(support) });
-      }
+      if (language && !source.hasLongLines)
+        void language
+          .load()
+          .then((support) => {
+            if (!disposed && view === created)
+              view.dispatch({ effects: syntax.reconfigure(support) });
+          })
+          .catch((failure) => {
+            if (!disposed && view === created)
+              error = (failure as Error).message;
+          });
     } catch (failure) {
       if (!request.signal.aborted) {
         if (
@@ -273,17 +289,13 @@
           !document
         ) {
           file.kind = 'download';
-        } else error = (failure as Error).message;
+        } else loadError = (failure as Error).message;
       }
     } finally {
       if (controller === request) {
-        loading = false;
+        file.loading = false;
         if (!disposed)
           view?.dispatch({ effects: input.reconfigure(inputMode(readonly)) });
-        if (!file.ready) {
-          file.ready = true;
-          onready();
-        }
       }
     }
   }
@@ -306,7 +318,8 @@
       !file.node.online ||
       file.missing ||
       file.nodeMissing ||
-      loading ||
+      file.loading ||
+      loadError ||
       file.saving
     )
       return;
@@ -321,6 +334,7 @@
       )
     ) {
       error = t('invalidUnicode');
+      onerror(t('fileSaveFailed').replace('{name}', () => file.entry.name));
       return;
     }
     controller?.abort();
@@ -344,7 +358,7 @@
         },
         await manager.session(),
       );
-      if (disposed) return;
+      if (disposed || request.signal.aborted) return;
       savedState = savingState;
       document = saved;
       file.missing = false;
@@ -356,6 +370,7 @@
         error = (failure as Error).message;
         conflict =
           failure instanceof FileError && failure.code === 'version_conflict';
+        onerror(t('fileSaveFailed').replace('{name}', () => file.entry.name));
       }
     } finally {
       file.saving = false;
@@ -380,11 +395,11 @@
     view?.dispatch({ effects: theme.reconfigure(appearance) });
   });
   $effect(() => {
-    const extension = wrapLines ? EditorView.lineWrapping : [];
+    const extension = wrapLines && !hasLongLines ? EditorView.lineWrapping : [];
     view?.dispatch({ effects: wrapping.reconfigure(extension) });
   });
   $effect(() => {
-    if (active) view?.requestMeasure();
+    if (active && !file.loading) view?.requestMeasure();
   });
   onMount(() => {
     void load();
@@ -403,10 +418,10 @@
             {t('reloadFile')}
           </button><button
             class="quiet-button danger"
-            disabled={!file.node.online}
+            disabled={!file.node.online || file.saving || file.loading}
             onclick={overwrite}
           >
-            {t('overwriteFile')}
+            {#if file.saving}<PendingLabel />{:else}{t('overwriteFile')}{/if}
           </button>{/if}
       </EditorNotice>{/if}
     {#if file.missing || file.nodeMissing}<EditorNotice
@@ -417,8 +432,21 @@
         message={t('editorOffline')}
         tone="warning"
       />{/if}
+    {#if hasLongLines && !file.loading && !loadError}
+      <EditorNotice message={t('longLineDisplay')} />
+    {/if}
     {#if readonly && document}<EditorNotice message={t('textReadOnly')} />{/if}
-    {#if loading}<EditorNotice message={t('loading')} />{/if}
   </div>
-  <div class="editor-host" bind:this={host}></div>
+  {#if file.loading || loadError}
+    <FileLoadFeedback
+      error={loadError}
+      onretry={() => reload()}
+      disabled={!file.node.online}
+    />
+  {/if}
+  <div
+    class="editor-host"
+    bind:this={host}
+    hidden={file.loading || !!loadError}
+  ></div>
 </div>

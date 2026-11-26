@@ -38,6 +38,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, nodeID string) 
 	}
 	p.command = c.ID
 	s.mu.Unlock()
+	s.publishUpdate("commands", nodeID, c.ID)
 	if err := send(p.ctx, p.conn, protocol.Message{Type: "exec", ID: c.ID, Command: c.Command, TimeoutSeconds: c.TimeoutSeconds}); err != nil {
 		if saved := s.unknown(c.ID, "delivery result unknown"); saved != nil {
 			s.databaseError(w, saved)
@@ -65,6 +66,7 @@ func (s *Server) commandMessage(p *peer, m protocol.Message) error {
 	if m.Type == "output" && (m.Stream != "stdout" && m.Stream != "stderr") {
 		return fmt.Errorf("invalid output stream")
 	}
+	var nodeID string
 	err := s.store.updateCommand(m.ID, func(c *protocol.Command) {
 		if protocol.Terminal(c.Status) {
 			return
@@ -72,6 +74,7 @@ func (s *Server) commandMessage(p *peer, m protocol.Message) error {
 		now := time.Now().UTC()
 		switch m.Type {
 		case "started":
+			nodeID = c.NodeID
 			c.Status = "running"
 			c.StartedAt = &now
 		case "output":
@@ -86,7 +89,11 @@ func (s *Server) commandMessage(p *peer, m protocol.Message) error {
 			} else {
 				c.Stderr = append(c.Stderr, data...)
 			}
+			if len(data) != 0 {
+				nodeID = c.NodeID
+			}
 		case "result":
+			nodeID = c.NodeID
 			c.ExitCode = m.ExitCode
 			c.Error = m.Error
 			c.Truncated = c.Truncated || m.Truncated
@@ -99,6 +106,16 @@ func (s *Server) commandMessage(p *peer, m protocol.Message) error {
 			}
 		}
 	})
+	if err == nil && nodeID != "" {
+		if m.Type == "output" {
+			scope := updateScope{Topic: "commands", NodeID: nodeID}
+			event := scope.event("output")
+			event.ID = m.ID
+			s.publishChange(scope, event)
+		} else {
+			s.publishUpdate("commands", nodeID, m.ID)
+		}
+	}
 	if err == nil && m.Type == "result" {
 		if p.command == m.ID {
 			p.command = ""

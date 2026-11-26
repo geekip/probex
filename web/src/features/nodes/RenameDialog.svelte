@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import { untrack } from 'svelte';
   import { Dialog } from 'bits-ui';
   import { api } from '@/shared/api';
@@ -21,6 +22,7 @@
 
   async function rename(event: SubmitEvent) {
     event.preventDefault();
+    if (busy) return;
     busy = true;
     error = '';
     try {
@@ -80,7 +82,7 @@
             {t('cancel')}
           </Dialog.Close>
           <button class="primary-button" disabled={busy}>
-            {t(busy ? 'processing' : 'save')}
+            {#if busy}<PendingLabel />{:else}{t('save')}{/if}
           </button>
         </div>
       </form>

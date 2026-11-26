@@ -206,7 +206,6 @@
             class="file-sort"
             title={t(headers[field].label)}
             onclick={() => onsort(field)}
-            {disabled}
           >
             <span>{t(headers[field].label)}</span>
             {#if sort === field}{#if order === 'asc'}<ChevronUp

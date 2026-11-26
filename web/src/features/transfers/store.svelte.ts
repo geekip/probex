@@ -1,16 +1,21 @@
+import { untrack } from 'svelte';
 import type { Node } from '@/features/nodes/types';
 import {
   FileError,
   fileRequest,
   fileJSON,
-  remoteJoin,
   type FileEntry,
 } from '@/features/files/api';
 import { t } from '@/shared/settings.svelte';
+import { api } from '@/shared/api';
+import {
+  updateKey,
+  type UpdateNotice,
+  type UpdateScope,
+} from '@/shared/updates';
 
 export type Transfer = {
   id: number;
-  name: string;
   nodeID: string;
   nodeName: string;
   windows: boolean;
@@ -21,11 +26,9 @@ export type Transfer = {
   state: 'running' | 'queued' | 'paused' | 'failed' | 'completed';
   error: string;
   file?: File;
-  directory?: boolean;
   serverID?: string;
   owner?: string;
   overwrite: boolean;
-  needsOverwrite: boolean;
   busy: boolean;
   cancelled: boolean;
   operation?: Promise<void>;
@@ -45,24 +48,31 @@ type Event = {
   upload?: Upload;
   error?: string;
 };
-export type PickedFile = { file: File; relative: string };
+export type PickedFile = { file: File; relative: string; overwrite?: boolean };
 export function createTransfers(onerror: (message: string) => void) {
   let tasks = $state<Transfer[]>([]),
     owner = $state(''),
     connecting = $state(false),
     visible = $state(false);
-  let revisions = $state<Record<string, number>>({});
   let sequence = 0,
     socket: WebSocket | undefined,
     ready: Promise<string> | undefined,
     closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectDelay = 1000;
+  const listeners = new Map<
+    string,
+    {
+      scope: UpdateScope;
+      callbacks: Set<(event: UpdateNotice) => void>;
+    }
+  >();
   const updates = new Map<string, Event>();
   function complete(task: Transfer) {
     if (task.state === 'completed') return;
     task.state = 'completed';
     task.error = '';
     task.file = undefined;
-    revisions[task.nodeID] = (revisions[task.nodeID] || 0) + 1;
   }
   function update(event: Event) {
     const data = event.upload;
@@ -82,6 +92,41 @@ export function createTransfers(onerror: (message: string) => void) {
     }
     pump();
   }
+  function subscribe(
+    scope: UpdateScope,
+    callback: (event: UpdateNotice) => void,
+  ) {
+    const key = updateKey(scope);
+    let listener = listeners.get(key);
+    if (!listener) {
+      listener = { scope, callbacks: new Set() };
+      listeners.set(key, listener);
+    }
+    listener.callbacks.add(callback);
+    if (untrack(() => owner) && socket?.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify({ type: 'subscribe', ...scope }));
+    return () => {
+      listener.callbacks.delete(callback);
+      if (listener.callbacks.size) return;
+      listeners.delete(key);
+      if (untrack(() => owner) && socket?.readyState === WebSocket.OPEN)
+        socket.send(JSON.stringify({ type: 'unsubscribe', ...scope }));
+    };
+  }
+  function reconnect() {
+    if (closed || reconnectTimer !== undefined) return;
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = undefined;
+      if (closed || socket) return;
+      try {
+        await api('session');
+        if (!closed) await connect();
+      } catch {
+        reconnect();
+      }
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  }
   function connect(): Promise<string> {
     if (
       socket &&
@@ -90,6 +135,8 @@ export function createTransfers(onerror: (message: string) => void) {
     )
       return ready!;
     closed = false;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
     connecting = true;
     ready = new Promise<string>((resolve, reject) => {
       const connection = new WebSocket(
@@ -98,11 +145,18 @@ export function createTransfers(onerror: (message: string) => void) {
       socket = connection;
       connection.onmessage = (message) => {
         if (socket !== connection) return;
-        const event = JSON.parse(message.data) as Event;
+        const event = JSON.parse(message.data) as Event | UpdateNotice;
         if (event.type === 'session') {
           owner = event.id!;
           connecting = false;
+          reconnectDelay = 1000;
+          for (const { scope } of listeners.values())
+            connection.send(JSON.stringify({ type: 'subscribe', ...scope }));
           resolve(owner);
+        } else if ('topic' in event) {
+          const listener = listeners.get(updateKey(event));
+          if (listener)
+            for (const callback of listener.callbacks) callback(event);
         } else update(event);
       };
       connection.onerror = () => reject(new Error(t('fileSessionError')));
@@ -120,6 +174,7 @@ export function createTransfers(onerror: (message: string) => void) {
               task.error = t('fileSessionEnded');
               task.controller?.abort();
             }
+        reconnect();
       };
     });
     return ready;
@@ -130,6 +185,8 @@ export function createTransfers(onerror: (message: string) => void) {
   }
   function close() {
     closed = true;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
     socket?.close();
     socket = undefined;
     ready = undefined;
@@ -139,69 +196,33 @@ export function createTransfers(onerror: (message: string) => void) {
       task.controller?.abort();
     }
     tasks = [];
-    revisions = {};
+    visible = false;
     updates.clear();
   }
   function make(
     node: Node,
     target: string,
-    name: string,
+    relative: string,
     size: number,
   ): Transfer {
     return {
       id: ++sequence,
-      name,
       nodeID: node.id,
       nodeName: node.name,
       windows: node.info.os === 'windows',
       target,
-      relative: name,
+      relative,
       size,
       offset: 0,
       state: 'queued',
       error: '',
       overwrite: false,
-      needsOverwrite: false,
       busy: false,
       cancelled: false,
     };
   }
-  async function ensureDirectory(
-    task: Transfer,
-    relative: string,
-    signal: AbortSignal,
-  ) {
-    const path = remoteJoin(task.target, relative, task.windows);
-    try {
-      const entry = await fileJSON<FileEntry>(
-        `nodes/${task.nodeID}/stat?path=${encodeURIComponent(path)}`,
-        { signal },
-        task.owner,
-      );
-      if (entry.type !== 'directory')
-        throw new Error(`${path}: ${t('notDirectory')}`);
-    } catch (error) {
-      if (!(error instanceof FileError) || error.status !== 404) throw error;
-      await fileJSON(
-        `nodes/${task.nodeID}/directories`,
-        { method: 'POST', body: JSON.stringify({ path }), signal },
-        task.owner,
-      );
-    }
-  }
   async function upload(task: Transfer, signal: AbortSignal) {
-    if (task.directory) {
-      const parts = task.relative.split('/');
-      for (let i = 1; i <= parts.length; i++)
-        await ensureDirectory(task, parts.slice(0, i).join('/'), signal);
-      if (!task.cancelled) complete(task);
-      return;
-    }
     if (!task.serverID) {
-      const parts = task.relative.split('/');
-      for (let i = 1; i < parts.length; i++)
-        await ensureDirectory(task, parts.slice(0, i).join('/'), signal);
-      if (task.cancelled || task.state === 'paused') return;
       const created = await fileJSON<Upload>(
         `nodes/${task.nodeID}/uploads`,
         {
@@ -262,15 +283,11 @@ export function createTransfers(onerror: (message: string) => void) {
       await upload(task, controller.signal);
     } catch (error) {
       if (task.cancelled || task.state === 'paused') return;
-      if (error instanceof FileError && error.code === 'exists') {
-        task.needsOverwrite = true;
-        task.state = 'paused';
-        task.error = t('overwriteQuestion');
-        onerror(`${task.name}: ${t('overwriteQuestion')}`);
-      } else {
-        task.state = 'failed';
-        task.error = (error as Error).message;
-      }
+      task.state = 'failed';
+      task.error =
+        error instanceof FileError && error.code === 'exists'
+          ? t('fileNameExists')
+          : (error as Error).message;
     } finally {
       task.busy = false;
       task.controller = undefined;
@@ -296,28 +313,16 @@ export function createTransfers(onerror: (message: string) => void) {
         task.operation = run(task);
       }
   }
-  async function enqueue(
-    node: Node,
-    target: string,
-    files: PickedFile[],
-    directories: string[] = [],
-  ) {
+  async function enqueue(node: Node, target: string, files: PickedFile[]) {
     if (!target) {
       onerror(t('chooseDirectory'));
       return;
     }
-    const added = [
-      ...directories.map((path) => ({
-        ...make(node, target, path, 0),
-        relative: path,
-        directory: true,
-      })),
-      ...files.map(({ file, relative }) => ({
-        ...make(node, target, relative, file.size),
-        file,
-        relative,
-      })),
-    ];
+    const added = files.map(({ file, relative, overwrite = false }) => ({
+      ...make(node, target, relative, file.size),
+      file,
+      overwrite,
+    }));
     tasks = [...tasks, ...added];
     visible = true;
     try {
@@ -352,7 +357,6 @@ export function createTransfers(onerror: (message: string) => void) {
     pump();
   }
   async function resume(task: Transfer) {
-    if (task.needsOverwrite) return;
     if (task.busy) await task.operation;
     task.state = 'queued';
     task.error = '';
@@ -392,13 +396,11 @@ export function createTransfers(onerror: (message: string) => void) {
       task.error = (error as Error).message;
     }
   }
-  async function restart(task: Transfer, overwrite = false) {
+  async function restart(task: Transfer) {
     task.controller?.abort();
     try {
       await connect();
       await release(task);
-      task.overwrite = overwrite;
-      task.needsOverwrite = false;
       task.error = '';
       task.state = 'queued';
       task.cancelled = false;
@@ -427,9 +429,6 @@ export function createTransfers(onerror: (message: string) => void) {
     pump();
   }
   return {
-    revision(nodeID: string) {
-      return revisions[nodeID] || 0;
-    },
     get tasks() {
       return tasks;
     },
@@ -446,6 +445,7 @@ export function createTransfers(onerror: (message: string) => void) {
       visible = value;
     },
     connect,
+    subscribe,
     session,
     close,
     enqueue,

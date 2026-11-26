@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Plugin } from 'vite';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { fixtures, commandResult, encode, type MockCommand } from './data';
@@ -141,6 +142,15 @@ export function mockPlugin(): Plugin {
           return;
         }
         try {
+          if (
+            !url.pathname.startsWith('/api/mock/') &&
+            req.headers.cookie
+              ?.split('; ')
+              .includes('probex_mock_weak_network=1')
+          ) {
+            await delay(1200);
+            if (res.destroyed) return;
+          }
           let body: Record<string, unknown> = {},
             raw = Buffer.alloc(0);
           if (['POST', 'PATCH', 'PUT'].includes(req.method!)) {
@@ -217,6 +227,8 @@ export function mockPlugin(): Plugin {
                 node.online = body.scenario !== 'offline';
                 node.status = node.online ? 'online' : 'offline';
                 if (node.online) node.last_seen = new Date().toISOString();
+                files.publish({ topic: 'nodes' }, node.id);
+                files.publish({ topic: 'forwards', node_id: node.id });
               }
             } else {
               problem(res, 400, 'unknown mock scenario');
@@ -234,6 +246,7 @@ export function mockPlugin(): Plugin {
             ) {
               node.admission = 'expired';
               node.status = 'expired';
+              files.publish({ topic: 'nodes' }, node.id);
             }
           }
           if (path === 'nodes' && method === 'GET') {
@@ -326,6 +339,7 @@ export function mockPlugin(): Plugin {
                   expires_at,
                 }),
               ).toString('base64url');
+            files.publish({ topic: 'nodes' }, node.id);
             json(res, create ? 201 : 200, { node, key, expires_at });
             return;
           }
@@ -351,6 +365,7 @@ export function mockPlugin(): Plugin {
             node.online = false;
             if (parts[2] === 'approve')
               node.joined_at = new Date().toISOString();
+            files.publish({ topic: 'nodes' }, node.id);
             json(res, 200, node);
             return;
           }
@@ -376,6 +391,7 @@ export function mockPlugin(): Plugin {
             }
             node.name = body.name;
             data.nodes.sort((a, b) => a.name.localeCompare(b.name));
+            files.publish({ topic: 'nodes' }, node.id);
             json(res, 200, node);
             return;
           }
@@ -387,6 +403,7 @@ export function mockPlugin(): Plugin {
             data.nodes = data.nodes.filter((n) => n.id !== node!.id);
             data.commands = data.commands.filter((c) => c.node_id !== node!.id);
             busy.delete(node.id);
+            files.publish({ topic: 'nodes' }, node.id);
             json(res, 200, { ok: true });
             return;
           }
@@ -409,6 +426,7 @@ export function mockPlugin(): Plugin {
                 c.status === 'queued' ||
                 c.status === 'running',
             );
+            files.publish({ topic: 'commands', node_id: node.id });
             json(
               res,
               200,
@@ -440,10 +458,16 @@ export function mockPlugin(): Plugin {
             };
             data.commands.unshift(record);
             busy.set(node.id, record.id);
+            const commandScope = {
+              topic: 'commands' as const,
+              node_id: node.id,
+            };
+            files.publish(commandScope, record.id);
             later(() => {
               if (!data.nodes.some((n) => n.id === record.node_id)) return;
               record.status = 'running';
               record.stdout = encode('Mock task started…\n');
+              files.publish(commandScope, record.id);
             }, 650);
             later(
               () => {
@@ -452,6 +476,7 @@ export function mockPlugin(): Plugin {
                   finished_at: new Date().toISOString(),
                 });
                 busy.delete(record.node_id);
+                files.publish(commandScope, record.id);
               },
               record.command === 'mock:slow' ? 12000 : 1800,
             );

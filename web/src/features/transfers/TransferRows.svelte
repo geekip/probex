@@ -1,19 +1,48 @@
-<script lang="ts">
-  import { Pause, Play, RotateCw, X, Check } from '@lucide/svelte';
-  import type { Transfer, Transfers } from '@/features/transfers/store.svelte';
-  import { t, bytes } from '@/shared/settings.svelte';
-  import { remoteJoin } from '@/features/files/api';
-  let { items, manager }: { items: Transfer[]; manager: Transfers } = $props();
-  const states = {
+<script module lang="ts">
+  import type { Transfer } from '@/features/transfers/store.svelte';
+  import type { Message } from '@/shared/settings.svelte';
+
+  export const transferStatusLabels = {
     running: 'transferring',
     queued: 'transferQueued',
     paused: 'transferPaused',
     failed: 'transferFailed',
     completed: 'transferCompleted',
-  } as const;
+  } as const satisfies Record<Transfer['state'], Message>;
 </script>
 
-<div class="transfer-table-scroll">
+<script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
+  import {
+    Pause,
+    Play,
+    RotateCw,
+    X,
+    Check,
+    LoaderCircle,
+  } from '@lucide/svelte';
+  import type { Transfers } from '@/features/transfers/store.svelte';
+  import { t, bytes } from '@/shared/settings.svelte';
+  import { remoteJoin } from '@/features/files/api';
+  let {
+    items,
+    manager,
+    disabled,
+  }: { items: Transfer[]; manager: Transfers; disabled: boolean } = $props();
+  type Action = 'resume' | 'restart' | 'cancel';
+  const pending = new SvelteMap<number, Action>();
+  async function act(item: Transfer, action: Action) {
+    if (disabled || pending.has(item.id)) return;
+    pending.set(item.id, action);
+    try {
+      await manager[action](item);
+    } finally {
+      pending.delete(item.id);
+    }
+  }
+</script>
+
+<div class="transfer-table-scroll" hidden={!items.length}>
   <table class="transfer-table">
     <thead>
       <tr>
@@ -29,7 +58,11 @@
           item.target,
           item.relative,
           item.windows,
-        )}<tr data-transfer={item.id} data-state={item.state}>
+        )}{@const action = pending.get(item.id)}<tr
+          data-transfer={item.id}
+          data-state={item.state}
+          aria-busy={!!action}
+        >
           <td title={path}>
             <span class="transfer-name">
               {path}
@@ -37,9 +70,9 @@
                 {item.error}
               </small>{/if}
           </td>
-          <td>{item.nodeName}</td><td>{t(states[item.state])}</td><td
-            class="transfer-size"
-          >
+          <td>{item.nodeName}</td><td>
+            {t(transferStatusLabels[item.state])}
+          </td><td class="transfer-size">
             <span>
               {bytes(item.offset)} / {bytes(item.size)}
             </span><progress
@@ -53,24 +86,23 @@
           </td>
           <td>
             <div class="transfer-actions">
-              {#if item.needsOverwrite}<button
-                  class="quiet-button"
-                  onclick={() => manager.restart(item, true)}
-                >
-                  {t('overwrite')}
-                </button>
-              {:else if item.state === 'paused'}<button
+              {#if item.state === 'paused'}<button
                   class="icon-button"
                   aria-label={t('resumeTransfer')}
                   title={t('resumeTransfer')}
-                  onclick={() => manager.resume(item)}
+                  disabled={disabled || !!action}
+                  onclick={() => act(item, 'resume')}
                 >
-                  <Play size={14} />
+                  {#if action === 'resume'}<LoaderCircle
+                      class="spin"
+                      size={14}
+                    />{:else}<Play size={14} />{/if}
                 </button>
               {:else if item.state === 'running' || item.state === 'queued'}<button
                   class="icon-button"
                   aria-label={t('pauseTransfer')}
                   title={t('pauseTransfer')}
+                  disabled={disabled || !!action}
                   onclick={() => manager.pause(item)}
                 >
                   <Pause size={14} />
@@ -79,9 +111,13 @@
                   class="icon-button"
                   aria-label={t('restartTransfer')}
                   title={t('restartTransfer')}
-                  onclick={() => manager.restart(item)}
+                  disabled={disabled || !!action}
+                  onclick={() => act(item, 'restart')}
                 >
-                  <RotateCw size={14} />
+                  {#if action === 'restart'}<LoaderCircle
+                      class="spin"
+                      size={14}
+                    />{:else}<RotateCw size={14} />{/if}
                 </button>
               {:else}<Check size={14} />{/if}
               <button
@@ -96,14 +132,17 @@
                     ? 'removeTransfer'
                     : 'cancelTransfer',
                 )}
-                onclick={() => manager.cancel(item)}
+                disabled={disabled || !!action}
+                onclick={() => act(item, 'cancel')}
               >
-                <X size={14} />
+                {#if action === 'cancel'}<LoaderCircle
+                    class="spin"
+                    size={14}
+                  />{:else}<X size={14} />{/if}
               </button>
             </div>
           </td>
         </tr>{/each}
     </tbody>
   </table>
-  {#if !items.length}<div class="file-empty">{t('noTransfers')}</div>{/if}
 </div>

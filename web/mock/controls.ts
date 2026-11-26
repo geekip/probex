@@ -13,6 +13,9 @@ panel.innerHTML = /* HTML */ `
       <option value="enroll">模拟待加入节点上线</option>
     </select>
     <button type="button">应用场景</button>
+    <label class="mock-network">
+      <input type="checkbox" /> 弱网环境（HTTP API 延迟 1.2 秒）
+    </label>
     <small
       >仅模拟数据，不执行真实命令。<br />命令输入 mock:help，终端输入
       help。</small
@@ -21,6 +24,15 @@ panel.innerHTML = /* HTML */ `
   </div>
 `;
 document.body.append(panel);
+const weakNetwork = panel.querySelector('input')!;
+weakNetwork.checked = document.cookie
+  .split('; ')
+  .includes('probex_mock_weak_network=1');
+weakNetwork.onchange = () => {
+  document.cookie = weakNetwork.checked
+    ? 'probex_mock_weak_network=1; Path=/; SameSite=Strict'
+    : 'probex_mock_weak_network=; Path=/; Max-Age=0; SameSite=Strict';
+};
 panel.querySelector('button')!.onclick = async () => {
   const response = await fetch('/api/mock/scenario', {
     method: 'POST',

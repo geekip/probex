@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
   import {
     Plus,
     RotateCw,
@@ -9,6 +8,7 @@
   } from '@lucide/svelte';
   import { api } from '@/shared/api';
   import type { Node } from '@/features/nodes/types';
+  import type { Transfers } from '@/features/transfers/store.svelte';
   import type { Confirmation } from '@/shared/components/ConfirmDialog.svelte';
   import ForwardDialog from './ForwardDialog.svelte';
   import { targetAddress, type Forward } from './types';
@@ -16,18 +16,21 @@
   let {
     node,
     active,
+    manager,
     onrequestconfirm,
   }: {
     node: Node;
     active: boolean;
+    manager: Transfers;
     onrequestconfirm: (request: Confirmation) => void;
   } = $props();
   let mappings = $state<Forward[]>([]),
-    busy = $state(false),
+    refreshing = $state(false),
     loaded = $state(false),
     error = $state('');
   let dialog = $state<{ mapping?: Forward } | null>(null);
   let controller: AbortController | undefined;
+  let pending = false;
   const nodeID = $derived(node.id);
   const statuses = {
     ready: 'forwardListening',
@@ -36,12 +39,17 @@
     node_offline: 'forwardNodeOffline',
     listen_error: 'forwardPortUnavailable',
   } as const;
-  async function refresh(force = false) {
-    if (busy && !force) return;
+  async function refresh(source: 'background' | 'manual' = 'background') {
+    if (source === 'background' && controller) {
+      pending = true;
+      return;
+    }
+    if (source === 'manual' && refreshing) return;
+    pending = false;
     controller?.abort();
     const request = new AbortController();
     controller = request;
-    busy = true;
+    refreshing = source === 'manual';
     try {
       const result = await api<Forward[]>(
         `forwards?node_id=${encodeURIComponent(node.id)}`,
@@ -58,7 +66,11 @@
         loaded = true;
       }
     } finally {
-      if (controller === request) busy = false;
+      if (controller === request) {
+        controller = undefined;
+        refreshing = false;
+        if (pending) void refresh();
+      }
     }
   }
   function remove(mapping: Forward) {
@@ -70,18 +82,21 @@
       detail: `${mapping.name} · ${mapping.protocol.toUpperCase()} · ${mapping.listen_addr} → ${targetAddress(mapping)}`,
       action: async () => {
         await api(`forwards/${mapping.id}`, { method: 'DELETE' });
-        await refresh(true);
       },
     });
   }
   $effect(() => {
     if (!active) return;
-    nodeID;
-    untrack(() => void refresh(true));
-    const timer = setInterval(() => void refresh(), 2000);
+    const unsubscribe = manager.subscribe(
+      { topic: 'forwards', node_id: nodeID },
+      () => void refresh(),
+    );
     return () => {
-      clearInterval(timer);
+      unsubscribe();
       controller?.abort();
+      controller = undefined;
+      pending = false;
+      refreshing = false;
     };
   });
 </script>
@@ -97,12 +112,13 @@
     </button>
     <button
       class="icon-button"
-      aria-label={t('refreshForwards')}
-      title={t('refreshForwards')}
-      disabled={busy}
-      onclick={() => refresh(true)}
+      aria-label={t('refresh')}
+      title={t('refresh')}
+      disabled={refreshing}
+      aria-busy={refreshing}
+      onclick={() => refresh('manual')}
     >
-      <RotateCw size={14} />
+      <RotateCw size={14} class={refreshing ? 'spin' : undefined} />
     </button>
   </div>
   <div class="forwards-list">
@@ -146,7 +162,7 @@
         {/if}
         <dl>
           <div>
-            <dt>{t('serverListen')}</dt>
+            <dt>{t('listenAddress')}</dt>
             <dd>{mapping.listen_addr}</dd>
           </div>
           <div>
@@ -165,6 +181,5 @@
 {#if dialog}<ForwardDialog
     {node}
     mapping={dialog.mapping}
-    onsaved={() => void refresh(true)}
     onclose={() => (dialog = null)}
   />{/if}

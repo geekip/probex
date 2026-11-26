@@ -43,3 +43,8 @@
   font-size: 12px;
   color: var(--muted);
 }
+.mock-network {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

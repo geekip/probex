@@ -128,9 +128,44 @@ func (s *Server) issueEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	if create {
 		status = http.StatusCreated
 	}
+	s.scheduleEnrollmentExpiry(n.ID, join.ExpiresAt)
+	s.publishUpdate("nodes", n.ID, "")
 	writeJSON(w, status, struct {
 		Node      protocol.Node `json:"node"`
 		Key       string        `json:"key"`
 		ExpiresAt time.Time     `json:"expires_at"`
 	}{n.Node, key, join.ExpiresAt})
+}
+
+func (s *Server) scheduleEnrollmentExpiry(id string, expires time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	if previous := s.enrollments[id]; previous != nil {
+		previous.Stop()
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(time.Until(expires), func() {
+		s.mu.Lock()
+		current := s.enrollments[id] == timer
+		if current {
+			delete(s.enrollments, id)
+		}
+		s.mu.Unlock()
+		if current {
+			s.publishUpdate("nodes", id, "")
+		}
+	})
+	s.enrollments[id] = timer
+}
+
+func (s *Server) cancelEnrollmentExpiry(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if timer := s.enrollments[id]; timer != nil {
+		timer.Stop()
+		delete(s.enrollments, id)
+	}
 }

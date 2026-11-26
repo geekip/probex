@@ -40,12 +40,17 @@ func (u *udpForward) reset(stream *tunnel.Stream) {
 	}
 	stream.Close()
 }
-func (s *Server) udpError(run *forwardRuntime, err error) {
+func (s *Server) setForwardError(run *forwardRuntime, err error) {
 	s.forwardsMu.Lock()
-	defer s.forwardsMu.Unlock()
+	previous := run.lastError
 	run.lastError = ""
 	if err != nil {
 		run.lastError = err.Error()
+	}
+	changed := previous != run.lastError
+	s.forwardsMu.Unlock()
+	if changed {
+		s.publishUpdate("forwards", run.config.NodeID, run.config.ID)
 	}
 }
 func (s *Server) startUDPForward(run *forwardRuntime) {
@@ -74,7 +79,7 @@ func (s *Server) startUDPForward(run *forwardRuntime) {
 				for _, id := range expired {
 					if err := stream.WriteDatagram(tunnel.Datagram{Flow: id, Close: true}); err != nil {
 						u.reset(stream)
-						s.udpError(run, err)
+						s.setForwardError(run, err)
 						break
 					}
 				}
@@ -99,6 +104,7 @@ func (s *Server) serveUDP(run *forwardRuntime, u *udpForward) {
 				s.forwardsMu.Lock()
 				run.listenError = err.Error()
 				s.forwardsMu.Unlock()
+				s.publishUpdate("forwards", run.config.NodeID, run.config.ID)
 			}
 			return
 		}
@@ -109,13 +115,13 @@ func (s *Server) serveUDP(run *forwardRuntime, u *udpForward) {
 			// Only this first packet is retained during setup. Kernel UDP buffers are finite.
 			stream, err = s.openStream(run.ctx, run.config.NodeID, protocol.Message{Purpose: "udp", Target: net.JoinHostPort(run.config.TargetHost, strconv.Itoa(run.config.TargetPort))})
 			if err != nil {
-				s.udpError(run, err)
+				s.setForwardError(run, err)
 				continue
 			}
 			u.mu.Lock()
 			u.stream = stream
 			u.mu.Unlock()
-			s.udpError(run, nil)
+			s.setForwardError(run, nil)
 			run.wg.Add(1)
 			go func(stream *tunnel.Stream) { defer run.wg.Done(); s.udpReplies(run, u, stream) }(stream)
 		}
@@ -133,7 +139,7 @@ func (s *Server) serveUDP(run *forwardRuntime, u *udpForward) {
 		u.flows[id] = udpVisitor{address: source, last: time.Now()}
 		u.mu.Unlock()
 		if err := stream.WriteDatagram(tunnel.Datagram{Flow: id, Data: b[:n]}); err != nil {
-			s.udpError(run, err)
+			s.setForwardError(run, err)
 			u.reset(stream)
 		}
 	}
@@ -144,7 +150,7 @@ func (s *Server) udpReplies(run *forwardRuntime, u *udpForward, stream *tunnel.S
 		d, err := stream.ReadDatagram()
 		if err != nil {
 			if run.ctx.Err() == nil {
-				s.udpError(run, err)
+				s.setForwardError(run, err)
 			}
 			return
 		}

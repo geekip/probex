@@ -143,7 +143,7 @@
       disabled={!count || !online}
       onSelect={ondownload}
     >
-      <Download size={14} />{t('downloadFiles')}
+      <Download size={14} />{t('download')}
     </ContextMenu.Item>
     <ContextMenu.Separator class="menu-separator" />
     <ContextMenu.Item

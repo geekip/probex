@@ -77,14 +77,14 @@
           disabled={!canReload}
           onSelect={onreload}
         >
-          {t('refreshEditor')}
+          {t('reload')}
         </DropdownMenu.Item>
         <DropdownMenu.Item
           class="menu-item"
           disabled={!online}
           onSelect={ondownload}
         >
-          {t('downloadFiles')}
+          {t('download')}
         </DropdownMenu.Item>
         <DropdownMenu.Separator class="menu-separator" />
         <TextFormatMenu {editor} kind="encoding" submenu />
@@ -112,27 +112,30 @@
         align="start"
       >
         <DropdownMenu.CheckboxItem class="menu-item" bind:checked={pinned}>
-          {t('pinEditor')}<span class="menu-arrow">
+          {t('pin')}<span class="menu-arrow">
             {#if pinned}<Check size={13} />{/if}
           </span>
         </DropdownMenu.CheckboxItem>
         <DropdownMenu.Item class="menu-item" onSelect={onminimize}>
-          {t('minimizeEditor')}
+          {t('minimize')}
         </DropdownMenu.Item>
         <DropdownMenu.Item
           class="menu-item"
           onSelect={() => (maximized = !maximized)}
         >
-          {t(maximized ? 'restoreEditor' : 'maximizeEditor')}
+          {t(maximized ? 'restore' : 'maximize')}
         </DropdownMenu.Item>
         <DropdownMenu.Item class="menu-item" onSelect={onclose}>
           {t('close')}
         </DropdownMenu.Item>
         <DropdownMenu.Separator class="menu-separator" />
         <DropdownMenu.Sub>
-          <DropdownMenu.SubTrigger class="menu-item" disabled={!editor}>
+          <DropdownMenu.SubTrigger
+            class="menu-item"
+            disabled={!status?.canWrap}
+          >
             {t('wordWrap')}<span class="editor-menu-value">
-              {t(wrapLines ? 'yes' : 'no')}
+              {t(wrapLines && status?.canWrap ? 'yes' : 'no')}
             </span><ChevronRight size={13} />
           </DropdownMenu.SubTrigger>
           <DropdownMenu.Portal>

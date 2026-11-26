@@ -427,13 +427,6 @@ tbody tr:hover {
   color: var(--muted);
   font-size: 13px;
 }
-.loading-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: pulse 1s ease-in-out infinite alternate;
-}
 @media (max-width: 768px) {
   .overview {
     padding: 28px 20px 30px;
@@ -556,7 +549,7 @@ tbody tr:hover {
   padding-inline: 6px;
 }
 .sidebar .brand-area .wordmark {
-  font-size: 22px;
+  font-size: 18px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

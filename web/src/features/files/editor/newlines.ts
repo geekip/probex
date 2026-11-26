@@ -6,6 +6,7 @@ import {
   RangeValue,
   StateEffect,
   StateField,
+  Text,
   type Extension,
   type Range,
 } from '@codemirror/state';
@@ -51,36 +52,58 @@ export const newlineState = StateField.define<Newlines>({
   },
 });
 
+// Wrapped layout for these lines can block the browser while measuring the DOM.
+const maxWrappedLineLength = 10_000;
+
 export function editorDocument(source: string): {
-  doc: string;
+  doc: Text;
+  hasLongLines: boolean;
   extensions: Extension;
 } {
-  const counts = new Map<string, number>();
-  for (const [value] of source.matchAll(/\r\n|\r|\n/g))
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  let separator = '\n',
-    largest = 0;
-  const values = new Map<string, LineEnding>();
-  for (const [value, count] of counts) {
-    if (count > largest) {
-      separator = value;
-      largest = count;
+  const hasCR = source.includes('\r');
+  const lines = source.split(hasCR ? /\r\n?|\n/ : '\n');
+  let separator = '\n';
+  let exceptions: RangeSet<LineEnding> = RangeSet.empty;
+  if (hasCR) {
+    const separators = ['\n', '\r\n', '\r'];
+    const endings = new Uint8Array(lines.length - 1);
+    const counts = new Map<number, number>();
+    let offset = 0;
+    for (let i = 0; i < endings.length; i++) {
+      offset += lines[i].length;
+      const ending =
+        source[offset] === '\n' ? 0 : source[offset + 1] === '\n' ? 1 : 2;
+      endings[i] = ending;
+      counts.set(ending, (counts.get(ending) ?? 0) + 1);
+      offset += separators[ending].length;
     }
-    values.set(value, new LineEnding(value));
+    let dominant = 0;
+    let largest = 0;
+    for (const [ending, count] of counts) {
+      if (count > largest) {
+        dominant = ending;
+        largest = count;
+      }
+    }
+    separator = separators[dominant];
+    if (counts.size > 1) {
+      const values = separators.map((value) => new LineEnding(value));
+      const ranges: Range<LineEnding>[] = [];
+      let position = 0;
+      for (let i = 0; i < endings.length; i++) {
+        position += lines[i].length;
+        const ending = endings[i];
+        if (ending !== dominant) ranges.push(values[ending].range(position));
+        position++;
+      }
+      exceptions = RangeSet.of(ranges);
+    }
   }
-  let removed = 0;
-  const exceptions: Range<LineEnding>[] = [];
-  const doc = source.replace(/\r\n|\r|\n/g, (value, offset) => {
-    const position = offset - removed;
-    if (value !== separator)
-      exceptions.push(values.get(value)!.range(position));
-    removed += value.length - 1;
-    return '\n';
-  });
   return {
-    doc,
+    doc: Text.of(lines),
+    hasLongLines: lines.some((line) => line.length > maxWrappedLineLength),
     extensions: [
-      initial.of({ separator, exceptions: RangeSet.of(exceptions) }),
+      initial.of({ separator, exceptions }),
       newlineState,
       invertedEffects.of((transaction) =>
         transaction.docChanged ||

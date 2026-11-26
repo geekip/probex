@@ -6,10 +6,12 @@
     Search,
     Server,
     ArrowRight,
+    LoaderCircle,
     KeyRound,
     CircleDot,
     Plus,
-    FileBraces,
+    SquarePen,
+    FolderUp,
   } from '@lucide/svelte';
   import { api, ApiError, onUnauthorized } from '@/shared/api';
   import type { Node } from '@/features/nodes/types';
@@ -26,14 +28,13 @@
   import ResizableColumns from './ResizableColumns.svelte';
   import Stats from '@/features/nodes/Stats.svelte';
   import NodePanel from '@/features/nodes/NodePanel.svelte';
-  import TransferMenu from '@/features/transfers/TransferMenu.svelte';
-  import UploadPicker from '@/features/transfers/UploadPicker.svelte';
+  import TransferWindow from '@/features/transfers/TransferWindow.svelte';
   import { clipboard } from '@/features/files/clipboard.svelte';
   import FileWindow, {
     type OpenedFile,
   } from '@/features/files/editor/FileWindow.svelte';
   import { createTransfers } from '@/features/transfers/store.svelte';
-  import type { FileEntry } from '@/features/files/api';
+  import { fileJSON, type FileEntry } from '@/features/files/api';
   import { fileKind } from '@/features/files/editor/file-kind';
   import Terminal from '@/features/terminal/TerminalWorkspace.svelte';
   import JoinDialog from '@/features/nodes/JoinDialog.svelte';
@@ -45,18 +46,18 @@
   import NodeIcon from '@/features/nodes/NodeIcon.svelte';
 
   const transfers = createTransfers((message) => notify(message));
-  let uploadPicker: UploadPicker;
+  const uploading = $derived(
+    transfers.tasks.filter(
+      (task) => task.state === 'running' || task.state === 'queued',
+    ).length,
+  );
   let openedFiles = $state<OpenedFile[]>([]),
     fileWindowVisible = $state(false),
     fileSequence = 0;
   let selectedFile = $state(0);
-  let requestedFile = 0;
-  function selectFile(file: OpenedFile) {
-    requestedFile = file.id;
-    if (file.kind !== 'text' || file.ready) {
-      selectedFile = file.id;
-      fileWindowVisible = true;
-    }
+  function selectFile(id: number) {
+    selectedFile = id;
+    fileWindowVisible = true;
   }
   function fileWithin(file: OpenedFile, directory: string) {
     const windows = file.node.info.os === 'windows';
@@ -65,28 +66,66 @@
     return path === parent || path.startsWith(parent + (windows ? '\\' : '/'));
   }
   function openFile(node: Node, entry: FileEntry) {
+    const normalize = (path: string) =>
+      node.info.os === 'windows' ? path.toLowerCase() : path;
     const existing = openedFiles.find(
       (file) =>
         file.node.id === node.id &&
-        (node.info.os === 'windows'
-          ? file.entry.path.toLowerCase() === entry.path.toLowerCase()
-          : file.entry.path === entry.path),
+        (normalize(file.entry.path) === normalize(entry.path) ||
+          (file.link && normalize(file.link.path) === normalize(entry.path))),
     );
     if (existing) {
-      selectFile(existing);
+      selectFile(existing.id);
       return;
     }
+    const kind = fileKind(entry.name);
+    const link = entry.type !== 'file' || entry.link_kind === 'shortcut';
     const file: OpenedFile = {
       id: ++fileSequence,
       node,
       entry: { ...entry },
-      kind: fileKind(entry.name),
-      ready: false,
+      kind,
+      link: link ? { path: entry.path, pending: true } : undefined,
+      loading: link || kind !== 'download',
       dirty: false,
       saving: false,
     };
     openedFiles = [...openedFiles, file];
-    selectFile(file);
+    selectFile(file.id);
+    if (link) void resolveFile(openedFiles.at(-1)!);
+  }
+  async function resolveFile(file: OpenedFile) {
+    const link = file.link!;
+    file.loading = true;
+    link.error = undefined;
+    try {
+      const entry = await fileJSON<FileEntry>(
+        `nodes/${file.node.id}/resolve?${new URLSearchParams({ path: link.path })}`,
+        {},
+        await transfers.session(),
+      );
+      if (!openedFiles.some((open) => open.id === file.id)) return;
+      const existing = openedFiles.find(
+        (open) =>
+          open.id !== file.id &&
+          open.node.id === file.node.id &&
+          (file.node.info.os === 'windows'
+            ? open.entry.path.toLowerCase() === entry.path.toLowerCase()
+            : open.entry.path === entry.path),
+      );
+      if (existing) {
+        if (selectedFile === file.id) selectedFile = existing.id;
+        openedFiles = openedFiles.filter((open) => open.id !== file.id);
+        return;
+      }
+      file.entry = entry;
+      file.kind = fileKind(entry.name);
+      link.pending = false;
+      file.loading = file.kind !== 'download';
+    } catch (failure) {
+      link.error = (failure as Error).message;
+      file.loading = false;
+    }
   }
   function discardFiles(files: OpenedFile[], action: () => void) {
     const dirty = files.filter((file) => file.dirty);
@@ -102,6 +141,18 @@
         action,
       });
     else action();
+  }
+  function closeFileTabs(ids: number[]) {
+    discardFiles(
+      openedFiles.filter((file) => ids.includes(file.id)),
+      () => {
+        const index = openedFiles.findIndex((file) => file.id === selectedFile);
+        openedFiles = openedFiles.filter((file) => !ids.includes(file.id));
+        if (ids.includes(selectedFile))
+          selectedFile =
+            openedFiles[Math.min(index, openedFiles.length - 1)]?.id || 0;
+      },
+    );
   }
   function renamedFile(id: string, path: string, destination: string) {
     for (const file of openedFiles)
@@ -125,10 +176,16 @@
   }
   $effect(() => {
     if (loggedIn) {
+      const unsubscribe = transfers.subscribe({ topic: 'nodes' }, (event) => {
+        void refresh(event.id);
+      });
       untrack(() => {
         void transfers.connect().catch((error) => notify(error.message));
       });
-      return () => transfers.close();
+      return () => {
+        unsubscribe();
+        transfers.close();
+      };
     }
   });
   type Tab = { id: string; name: string };
@@ -154,6 +211,9 @@
   let viewportWidth = $state(innerWidth);
   let terminals = new Map<string, Terminal>();
   let refreshing = false;
+  let refreshAll = false;
+  const pendingNodes = new Set<string>();
+  let nodeRequests = new AbortController();
   let dismissTimer: ReturnType<typeof setTimeout>;
   const online = $derived(
     nodes.filter((node) => node.status === 'online').length,
@@ -174,6 +234,11 @@
     dismissTimer = setTimeout(() => (notice = ''), 5000);
   }
   function reset(keepEditor = false) {
+    nodeRequests.abort();
+    nodeRequests = new AbortController();
+    pendingNodes.clear();
+    refreshAll = false;
+    refreshing = false;
     loggedIn = false;
     tabs = [];
     active = '';
@@ -187,7 +252,6 @@
     if (!keepEditor) {
       openedFiles = [];
       selectedFile = 0;
-      requestedFile = 0;
       fileWindowVisible = false;
     }
     notice = '';
@@ -212,7 +276,7 @@
       danger: action === 'reject',
       action: async () => {
         await api(`nodes/${node.id}/${action}`, { method: 'POST', body: '{}' });
-        await refresh();
+        await refresh(node.id);
       },
     });
   }
@@ -238,54 +302,93 @@
         transfers.removeNode(node.id);
         openedFiles = openedFiles.filter((file) => file.node.id !== node.id);
         closeTab(node.id);
-        await refresh();
+        await refresh(node.id);
       },
     });
   }
-  async function refresh() {
-    if (!loggedIn || refreshing) return;
+  async function refresh(id?: string) {
+    if (!loggedIn) return;
+    if (id) pendingNodes.add(id);
+    else refreshAll = true;
+    if (refreshing) return;
+    const signal = nodeRequests.signal;
     refreshing = true;
     try {
-      nodes = await api<Node[]>('nodes');
-      for (const id of new Set(transfers.tasks.map((task) => task.nodeID)))
-        if (!nodes.some((node) => node.id === id)) transfers.removeNode(id);
-      for (const task of transfers.tasks) {
-        const node = nodes.find((node) => node.id === task.nodeID);
-        if (node) task.nodeName = node.name;
-      }
-      for (const file of openedFiles) {
-        const node = nodes.find((node) => node.id === file.node.id);
-        if (node) {
-          file.node = node;
-          file.nodeMissing = false;
+      while (!signal.aborted && (refreshAll || pendingNodes.size)) {
+        if (refreshAll) {
+          refreshAll = false;
+          pendingNodes.clear();
+          const snapshot = await api<Node[]>('nodes', { signal });
+          if (!signal.aborted) nodes = snapshot;
         } else {
-          file.nodeMissing = true;
-          file.node.online = false;
+          const ids = [...pendingNodes];
+          pendingNodes.clear();
+          const changed = await Promise.allSettled(
+            ids.map((id) => api<Node>(`nodes/${id}`, { signal })),
+          );
+          if (signal.aborted) return;
+          const next = new Map(nodes.map((node) => [node.id, node]));
+          changed.forEach((result, index) => {
+            if (result.status === 'fulfilled') {
+              next.set(ids[index], result.value);
+            } else if (
+              result.reason instanceof ApiError &&
+              result.reason.status === 404
+            ) {
+              next.delete(ids[index]);
+            } else {
+              notify((result.reason as Error).message);
+            }
+          });
+          nodes = [...next.values()].sort((a, b) => {
+            if (a.id === '0' || b.id === '0') return a.id === '0' ? -1 : 1;
+            if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+            return a.id.length - b.id.length || a.id.localeCompare(b.id);
+          });
         }
-      }
-      for (const tab of [...tabs]) {
-        const node = nodes.find((node) => node.id === tab.id);
-        if (node) tab.name = node.name;
-        else {
-          transfers.removeNode(tab.id);
-          closeTab(tab.id);
-        }
+        if (!signal.aborted) syncNodes();
       }
     } catch (error) {
-      if (loggedIn) notify((error as Error).message);
+      if (!signal.aborted) notify((error as Error).message);
     } finally {
-      refreshing = false;
+      if (!signal.aborted) refreshing = false;
+    }
+  }
+  function syncNodes() {
+    for (const id of new Set(transfers.tasks.map((task) => task.nodeID)))
+      if (!nodes.some((node) => node.id === id)) transfers.removeNode(id);
+    for (const task of transfers.tasks) {
+      const node = nodes.find((node) => node.id === task.nodeID);
+      if (node) task.nodeName = node.name;
+    }
+    for (const file of openedFiles) {
+      const node = nodes.find((node) => node.id === file.node.id);
+      if (node) {
+        file.node = node;
+        file.nodeMissing = false;
+      } else {
+        file.nodeMissing = true;
+        file.node.online = false;
+      }
+    }
+    for (const tab of [...tabs]) {
+      const node = nodes.find((node) => node.id === tab.id);
+      if (node) tab.name = node.name;
+      else {
+        transfers.removeNode(tab.id);
+        closeTab(tab.id);
+      }
     }
   }
   async function login(event: SubmitEvent) {
     event.preventDefault();
+    if (signingIn) return;
     signingIn = true;
     try {
       await api('login', { method: 'POST', body: JSON.stringify({ token }) });
       token = '';
       loggedIn = true;
       notice = '';
-      await refresh();
     } catch (error) {
       notify(
         error instanceof ApiError && error.status === 401
@@ -359,16 +462,14 @@
       }
     });
     void api('session')
-      .then(async () => {
+      .then(() => {
         loggedIn = true;
-        await refresh();
       })
       .catch((error) => {
         if (!(error instanceof ApiError && error.status === 401))
           notify((error as Error).message);
       })
       .finally(() => (checking = false));
-    const timer = setInterval(() => void refresh(), 3000);
     const media = matchMedia('(prefers-color-scheme: dark)');
     const themeChange = () => (preferences.dark = media.matches);
     const languageChange = () =>
@@ -376,7 +477,7 @@
     media.addEventListener('change', themeChange);
     window.addEventListener('languagechange', languageChange);
     return () => {
-      clearInterval(timer);
+      nodeRequests.abort();
       clearTimeout(dismissTimer);
       media.removeEventListener('change', themeChange);
       window.removeEventListener('languagechange', languageChange);
@@ -390,22 +491,34 @@
   <div class="workspace-tools" class:tools-labeled={labeled}>
     <button
       class="icon-button workspace-tool editor-trigger"
-      aria-label={t('fileWindow')}
-      title={t('fileWindow')}
+      aria-label={t('editor')}
+      title={t('editor')}
       onclick={() => (fileWindowVisible = true)}
     >
-      <FileBraces size={16} />{#if labeled}<span>
+      <SquarePen size={16} />{#if labeled}<span>
           {t('editor')}
         </span>{/if}{#if openedFiles.some((file) => file.dirty)}<span
           class="workspace-count"
         >
           {openedFiles.filter((file) => file.dirty).length}
         </span>{/if}
-    </button><TransferMenu
-      manager={transfers}
-      {labeled}
-      onrequestconfirm={requestConfirmation}
-    />
+    </button>
+    <button
+      id="transfer-window-trigger"
+      class="icon-button workspace-tool transfer-trigger"
+      aria-label={t('fileTransfers')}
+      title={t('fileTransfers')}
+      aria-haspopup="dialog"
+      aria-controls="transfer-window"
+      aria-expanded={transfers.visible}
+      onclick={() => (transfers.visible = !transfers.visible)}
+    >
+      <FolderUp size={16} />{#if labeled}<span>
+          {t('fileTransfers')}
+        </span>{/if}{#if uploading}<span class="workspace-count">
+          {uploading}
+        </span>{/if}
+    </button>
   </div>
 {/snippet}
 
@@ -420,7 +533,8 @@
   </div>{/if}
 
 {#if checking}<main class="checking">
-    <span class="loading-dot"></span><span>Probex</span>
+    <LoaderCircle class="spin" size={16} aria-hidden="true" />
+    <span>Probex</span>
   </main>
 {:else if !loggedIn}
   <main class="login-screen">
@@ -429,7 +543,7 @@
         <h1>Probex</h1>
         <SettingsMenu {loggedIn} onlogout={logout} />
       </div>
-      <form onsubmit={login}>
+      <form onsubmit={login} aria-busy={signingIn}>
         <div class="token-input">
           <KeyRound size={16} /><input
             id="token"
@@ -438,11 +552,17 @@
             bind:value={token}
             placeholder="••••••••••••"
             required
+            disabled={signingIn}
             autocomplete="current-password"
           />
         </div>
         <button class="primary-button" disabled={signingIn}>
-          {t('login')}<ArrowRight size={16} />
+          {t(signingIn ? 'loginPending' : 'login')}
+          {#if signingIn}
+            <LoaderCircle class="spin" size={16} aria-hidden="true" />
+          {:else}
+            <ArrowRight size={16} aria-hidden="true" />
+          {/if}
         </button>
       </form>
       <p class="login-help">{t('loginHelp')}</p>
@@ -473,7 +593,7 @@
             class="quiet-button refresh-button"
             aria-label={t('refresh')}
             title={t('refresh')}
-            onclick={refresh}
+            onclick={() => void refresh()}
           >
             <RotateCw size={15} /><span class="refresh-label">
               {t('refresh')}
@@ -585,7 +705,7 @@
               class="icon-button"
               aria-label={t('refresh')}
               title={t('refresh')}
-              onclick={refresh}
+              onclick={() => void refresh()}
             >
               <RotateCw size={15} />
             </button><button
@@ -681,11 +801,12 @@
                     <NodePanel
                       {node}
                       active={active === tab.id}
+                      loadingFiles={openedFiles.some(
+                        (file) => file.node.id === node.id && file.loading,
+                      )}
                       historyPaused={confirmation?.title === 'delete' ||
                         confirmation?.title === 'clearHistory'}
                       manager={transfers}
-                      onupload={(target, kind) =>
-                        uploadPicker.choose(node, target, kind)}
                       onopen={(entry) => openFile(node, entry)}
                       onrenamed={(path, destination) =>
                         renamedFile(node.id, path, destination)}
@@ -713,7 +834,6 @@
       joining = false;
       joinNode = undefined;
     }}
-    oncreated={() => void refresh()}
     onerror={notify}
   />{/if}
 
@@ -733,35 +853,24 @@
     onclose={() => (confirmation = null)}
   />{/if}
 
-<UploadPicker bind:this={uploadPicker} manager={transfers} />
+{#if loggedIn}
+  <TransferWindow manager={transfers} onrequestconfirm={requestConfirmation} />
+{/if}
 {#if loggedIn || openedFiles.length}<FileWindow
     bind:files={openedFiles}
     visible={loggedIn && fileWindowVisible}
     manager={transfers}
-    onminimize={() => {
-      requestedFile = 0;
-      fileWindowVisible = false;
-    }}
+    onminimize={() => (fileWindowVisible = false)}
     selected={selectedFile}
-    onselect={(id) => selectFile(openedFiles.find((file) => file.id === id)!)}
-    onready={(file) => {
-      if (
-        requestedFile === file.id &&
-        openedFiles.some((open) => open.id === file.id)
-      )
-        selectFile(file);
-    }}
+    onselect={selectFile}
+    onresolve={resolveFile}
     onrequestconfirm={requestConfirmation}
     onerror={notify}
-    onremove={(id) =>
-      discardFiles(
-        openedFiles.filter((file) => file.id === id),
-        () => (openedFiles = openedFiles.filter((file) => file.id !== id)),
-      )}
+    onremove={closeFileTabs}
     onclose={() =>
       discardFiles(openedFiles, () => {
         openedFiles = [];
-        requestedFile = 0;
+        selectedFile = 0;
         fileWindowVisible = false;
       })}
   />{/if}

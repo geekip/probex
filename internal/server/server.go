@@ -41,6 +41,7 @@ type peer struct {
 	terminals map[string]*terminalPeer
 }
 type Server struct {
+	updates      updateHub
 	filesMu      sync.Mutex
 	fileOwners   map[string]*fileOwner
 	fileTasks    map[string]*fileTask
@@ -53,6 +54,7 @@ type Server struct {
 	mu           sync.Mutex
 	peers        map[string]*peer
 	sessions     map[string]time.Time
+	enrollments  map[string]*time.Timer
 	terminals    map[*websocket.Conn]string
 	agents       sync.WaitGroup
 	localCancel  context.CancelFunc
@@ -76,10 +78,20 @@ func New(store *Store, config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	nodes, err := store.nodes(config.LocalNode)
+	if err != nil {
+		return nil, err
+	}
+	s.enrollments = make(map[string]*time.Timer)
 	if config.LocalNode {
 		if err := s.startLocalNode(); err != nil {
 			s.Close()
 			return nil, err
+		}
+	}
+	for _, node := range nodes {
+		if node.Admission == "invited" && node.KeyExpiresAt != nil {
+			s.scheduleEnrollmentExpiry(node.ID, *node.KeyExpiresAt)
 		}
 	}
 	for _, f := range list {
@@ -334,6 +346,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			n.SetStatus(s.peers[id] != nil)
 			s.mu.Unlock()
+			s.publishUpdate("nodes", id, "")
 			writeJSON(w, 200, n.Node)
 		case "DELETE":
 			s.forwardOpsMu.Lock()
@@ -357,8 +370,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			if p != nil {
 				p.conn.Close(websocket.StatusPolicyViolation, "node revoked")
 			}
+			s.cancelEnrollmentExpiry(id)
 			s.removeNodeFileTasks(id)
 			s.stopNodeForwards(id)
+			s.publishUpdate("nodes", id, "")
+			s.publishUpdate("forwards", id, "")
 			writeJSON(w, 200, map[string]bool{"ok": true})
 		default:
 			problem(w, 405, "method not allowed")
@@ -399,6 +415,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				s.databaseError(w, err)
 				return
 			}
+			s.publishUpdate("commands", id, "")
 			writeJSON(w, 200, history)
 		case "GET":
 			offset := 0
@@ -579,13 +596,19 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, id, key stri
 		}
 	}
 	s.mu.Unlock()
+	s.cancelEnrollmentExpiry(id)
+	s.publishUpdate("nodes", id, "")
+	if old == nil {
+		s.publishUpdate("forwards", id, "")
+	}
 	if old != nil {
 		old.conn.Close(websocket.StatusGoingAway, "connection replaced")
 	}
 	defer func() {
 		cancel()
 		s.mu.Lock()
-		if s.peers[id] == p {
+		disconnected := s.peers[id] == p
+		if disconnected {
 			delete(s.peers, id)
 		}
 		active := p.command
@@ -593,6 +616,10 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, id, key stri
 			t.cancel()
 		}
 		s.mu.Unlock()
+		if disconnected {
+			s.publishUpdate("nodes", id, "")
+			s.publishUpdate("forwards", id, "")
+		}
 		if active != "" {
 			if err := s.unknown(active, "connection lost before result"); err != nil {
 				log.Printf("persist disconnect: %v", err)
@@ -609,6 +636,9 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, id, key stri
 		}
 		if m.Type == "info" && m.Info != nil {
 			err = s.store.updateNode(id, func(n *protocol.Node) { n.Info = *m.Info; n.LastSeen = time.Now().UTC() })
+			if err == nil {
+				s.publishUpdate("nodes", id, "")
+			}
 		} else if m.Type == "stream_error" {
 			err = s.streamError(p, m)
 		} else {
@@ -626,14 +656,19 @@ func send(ctx context.Context, conn *websocket.Conn, m protocol.Message) error {
 	return wsjson.Write(ctx, conn, m)
 }
 func (s *Server) unknown(id, reason string) error {
+	var nodeID string
 	err := s.store.updateCommand(id, func(c *protocol.Command) {
 		if !protocol.Terminal(c.Status) {
+			nodeID = c.NodeID
 			now := time.Now().UTC()
 			c.Status = "unknown"
 			c.Error = reason
 			c.FinishedAt = &now
 		}
 	})
+	if err == nil && nodeID != "" {
+		s.publishUpdate("commands", nodeID, id)
+	}
 	// Node deletion may remove the record while disconnect cleanup is in flight.
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -643,6 +678,10 @@ func (s *Server) unknown(id, reason string) error {
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
+	for id, timer := range s.enrollments {
+		timer.Stop()
+		delete(s.enrollments, id)
+	}
 	if s.localCancel != nil {
 		s.localCancel()
 	}

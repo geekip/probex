@@ -12,6 +12,7 @@
   let {
     node,
     active,
+    loadingFiles,
     historyPaused,
     manager,
     onerror,
@@ -20,13 +21,13 @@
     onreview,
     onremove,
     onenrollment,
-    onupload,
     onopen,
     onrenamed,
     onremoved,
   }: {
     node: Node;
     active: boolean;
+    loadingFiles: boolean;
     historyPaused: boolean;
     manager: Transfers;
     onerror: (message: string) => void;
@@ -35,7 +36,6 @@
     onreview: (node: Node, action: 'approve' | 'reject') => void;
     onremove: () => void;
     onenrollment: () => void;
-    onupload: (directory: string, kind?: 'files' | 'folder') => void;
     onopen: (entry: FileEntry) => void;
     onrenamed: (path: string, destination: string) => void;
     onremoved: (paths: string[]) => void;
@@ -98,6 +98,7 @@
   >
     <NodeInfo
       {node}
+      {manager}
       active={active && tab === 'info' && !historyPaused}
       {onerror}
       {onrequestconfirm}
@@ -113,10 +114,10 @@
     {#if filesMounted}<FileBrowser
         {node}
         active={active && tab === 'files'}
+        {loadingFiles}
         {manager}
         {onerror}
         {onrequestconfirm}
-        {onupload}
         {onopen}
         {onrenamed}
         {onremoved}
@@ -131,6 +132,7 @@
   >
     {#if forwardsMounted}<Forwards
         {node}
+        {manager}
         active={active && tab === 'forwards'}
         {onrequestconfirm}
       />{/if}

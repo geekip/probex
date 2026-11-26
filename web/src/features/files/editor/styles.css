@@ -23,23 +23,9 @@
 .file-window.maximized {
   resize: none;
 }
-.file-window-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.file-window-heading .dialog-title {
-  font-size: 14px;
-  white-space: nowrap;
-}
-.window-drag-area {
-  cursor: move;
-  touch-action: none;
-}
 .file-window-tabs {
+  display: flex;
+  min-width: 0;
   flex: none;
   height: 38px;
   border-bottom: 1px solid var(--border);
@@ -49,6 +35,19 @@
 }
 .file-window-tabs .workspace-tab {
   height: 28px;
+}
+.file-tab-saving {
+  position: absolute;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 23px;
+  pointer-events: none;
+}
+.tab-wrap:hover .file-tab-saving,
+.tab-title:focus-visible ~ .file-tab-saving,
+.tab-close:focus-visible + .file-tab-saving {
+  visibility: hidden;
 }
 .file-window-content {
   flex-direction: column;
@@ -128,9 +127,6 @@
 .editor-menu-trigger:hover,
 .editor-menu-trigger[data-state='open'] {
   background: var(--surface-hover);
-}
-.file-window-heading > .toolbar-actions {
-  margin-left: auto;
 }
 .editor-menu kbd,
 .editor-menu-value {
@@ -307,10 +303,6 @@
   .editor-menu-trigger {
     padding-inline: 5px;
   }
-  .file-window-heading {
-    gap: 5px;
-    padding-inline: 8px;
-  }
 }
 
 .editor-empty-state {
@@ -328,4 +320,19 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.6;
+}
+.file-load-feedback {
+  gap: 10px;
+}
+.file-load-error-icon {
+  color: var(--error);
+}
+.file-load-feedback small {
+  overflow-wrap: anywhere;
+}
+.editor-host[hidden],
+.media-preview-stage[hidden],
+.pdf-controls[hidden],
+.pdf-canvas-scroll[hidden] {
+  display: none;
 }

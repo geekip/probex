@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -76,6 +77,19 @@ func TestServiceLinksResolveAndEdit(t *testing.T) {
 	serviceRequest(t, s, "PUT", "/links", "owner", map[string]any{"path": renamed, "target": target, "hard": true}, nil, 200, nil).Body.Close()
 	serviceRequest(t, s, "PUT", "/links", "owner", map[string]any{"path": renamed, "target": other}, nil, 200, nil).Body.Close()
 	serviceRequest(t, s, "POST", "/links", "owner", map[string]any{"path": hard, "target": target, "hard": true}, nil, 201, nil).Body.Close()
+	var listing Listing
+	serviceRequest(t, s, "GET", "/files?path="+url.QueryEscape(dir), "owner", nil, nil, 200, &listing).Body.Close()
+	kinds := make(map[string]string, len(listing.Entries))
+	for _, entry := range listing.Entries {
+		kinds[entry.Path] = entry.LinkKind
+	}
+	hardKind := "hard"
+	if runtime.GOOS == "windows" {
+		hardKind = ""
+	}
+	if kinds[hard] != hardKind || kinds[target] != hardKind || kinds[other] != "" || kinds[renamed] != "symlink" {
+		t.Fatalf("unexpected link kinds: %v", kinds)
+	}
 	serviceRequest(t, s, "GET", "/links?path="+url.QueryEscape(hard), "owner", nil, nil, 200, &l).Body.Close()
 	if !l.Hard || l.Kind != "hard" || l.Target != "" {
 		t.Fatal(l)

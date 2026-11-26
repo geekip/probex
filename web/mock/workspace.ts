@@ -5,6 +5,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebSocket } from 'ws';
 import type { Node } from '@/features/nodes/types';
 import type { FileEntry } from '@/features/files/api';
+import {
+  updateKey,
+  type UpdateNotice,
+  type UpdateScope,
+} from '../src/shared/updates';
 
 type Item = {
   entry: FileEntry;
@@ -61,7 +66,10 @@ const media: Record<string, { bytes: Buffer; mime: string }> =
 // These are in-memory UI fixtures. They never access the host filesystem or network.
 export function workspace(nodes: () => Node[]) {
   const trees = new Map<string, Map<string, Item>>();
-  const owners = new Map<string, { socket: WebSocket; session?: string }>();
+  const owners = new Map<
+    string,
+    { socket: WebSocket; session?: string; subscriptions: Set<string> }
+  >();
   const uploads = new Map<string, Transfer>(),
     downloads = new Map<string, Transfer>();
   const forwards = new Map<
@@ -243,10 +251,37 @@ export function workspace(nodes: () => Node[]) {
     emit(task, false);
     task.timer = setTimeout(() => stream(task), 40);
   }
+  function publish(
+    scope: UpdateScope,
+    id?: string,
+    type: UpdateNotice['type'] = 'change',
+  ) {
+    const key = updateKey(scope);
+    for (const { socket, subscriptions } of owners.values())
+      if (socket.readyState === 1 && subscriptions.has(key))
+        socket.send(JSON.stringify({ ...scope, type, id }));
+  }
   return {
+    publish,
     open(socket: WebSocket, session?: string) {
       const owner = id();
-      owners.set(owner, { socket, session });
+      const subscriptions = new Set<string>();
+      owners.set(owner, { socket, session, subscriptions });
+      socket.on('message', (message) => {
+        let request: UpdateScope & { type: string };
+        try {
+          request = JSON.parse(message.toString());
+        } catch {
+          socket.close(1008, 'invalid request');
+          return;
+        }
+        if (request.type === 'subscribe') {
+          subscriptions.add(updateKey(request));
+          socket.send(JSON.stringify({ ...request, type: 'subscribed' }));
+        } else if (request.type === 'unsubscribe') {
+          subscriptions.delete(updateKey(request));
+        }
+      });
       socket.send(JSON.stringify({ type: 'session', id: owner }));
       socket.once('close', () => closeOwner(owner));
     },
@@ -315,9 +350,16 @@ export function workspace(nodes: () => Node[]) {
           return true;
         }
         if (method === 'DELETE') {
-          if (!forwards.delete(parts[1]))
-            problem(res, 404, 'mapping not found', 'not_found');
-          else json(res, 200, { ok: true });
+          const mapping = forwards.get(parts[1]);
+          if (!mapping) problem(res, 404, 'mapping not found', 'not_found');
+          else {
+            forwards.delete(mapping.id);
+            publish(
+              { topic: 'forwards', node_id: mapping.node_id },
+              mapping.id,
+            );
+            json(res, 200, { ok: true });
+          }
           return true;
         }
         if (method === 'POST' || method === 'PUT') {
@@ -389,6 +431,7 @@ export function workspace(nodes: () => Node[]) {
               : new Date().toISOString(),
           };
           forwards.set(mapping.id, mapping);
+          publish({ topic: 'forwards', node_id: mapping.node_id }, mapping.id);
           json(res, existing ? 200 : 201, withStatus(mapping));
           return true;
         }
@@ -476,7 +519,8 @@ export function workspace(nodes: () => Node[]) {
           const n = nodes().find((n) => n.id === task.node_id)!,
             entries = tree(n),
             { path } = paths(n);
-          if (entries.has(task.path) && !task.overwrite) {
+          const existing = entries.get(task.path);
+          if (existing && (!task.overwrite || existing.entry.type !== 'file')) {
             problem(res, 409, 'destination exists', 'exists');
             return true;
           }
@@ -689,7 +733,17 @@ export function workspace(nodes: () => Node[]) {
         const destination = absolute(
           path.join(String(body.directory), String(body.relative)),
         );
-        if (entries.has(destination) && !body.overwrite) {
+        const existing = entries.get(destination);
+        if (existing && existing.entry.type !== 'file') {
+          problem(
+            res,
+            415,
+            'upload target must be a regular file',
+            'unsupported',
+          );
+          return true;
+        }
+        if (existing && !body.overwrite) {
           problem(res, 409, 'destination exists', 'exists');
           return true;
         }

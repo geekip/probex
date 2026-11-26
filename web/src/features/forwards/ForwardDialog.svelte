@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PendingLabel from '@/shared/components/PendingLabel.svelte';
   import { untrack } from 'svelte';
   import { Dialog, DropdownMenu } from 'bits-ui';
   import { Check, ChevronDown } from '@lucide/svelte';
@@ -14,12 +15,10 @@
   let {
     node,
     mapping,
-    onsaved,
     onclose,
   }: {
     node: Node;
     mapping?: Forward;
-    onsaved: () => void;
     onclose: () => void;
   } = $props();
   const initial = untrack(() => mapping);
@@ -39,6 +38,7 @@
   const id = $props.id();
   async function save(event: SubmitEvent) {
     event.preventDefault();
+    if (busy) return;
     busy = true;
     portError = '';
     error = '';
@@ -57,7 +57,6 @@
           target_port: destination.port,
         }),
       });
-      onsaved();
       onclose();
     } catch (failure) {
       if (
@@ -177,7 +176,9 @@
           >
             {t('cancel')}
           </button><button class="primary-button" disabled={busy}>
-            {t(busy ? 'processing' : initial ? 'save' : 'addForward')}
+            {#if busy}<PendingLabel />{:else}{t(
+                initial ? 'save' : 'addForward',
+              )}{/if}
           </button>
         </div>
       </form>

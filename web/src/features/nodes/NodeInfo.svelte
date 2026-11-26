@@ -1,21 +1,24 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
   import { Cpu, Server, History, Trash2 } from '@lucide/svelte';
   import { api, output } from '@/shared/api';
   import type { Node, Command } from '@/features/nodes/types';
+  import type { Transfers } from '@/features/transfers/store.svelte';
   import { t, bytes, date } from '@/shared/settings.svelte';
   import type { Confirmation } from '@/shared/components/ConfirmDialog.svelte';
   let {
     node,
     active,
+    manager,
     onerror,
     onrequestconfirm,
   }: {
     node: Node;
     active: boolean;
+    manager: Transfers;
     onerror: (message: string) => void;
     onrequestconfirm: (request: Confirmation) => void;
   } = $props();
+  const nodeID = $derived(node.id);
   let records = $state<Command[]>([]);
   let result = $state<Command | null>(null);
   let selected = $state('');
@@ -24,11 +27,19 @@
   let moreFailed = $state(false);
   let sentinel = $state<HTMLDivElement>();
   let refreshing = false;
+  let refreshQueued = false;
+  let outputTimer: ReturnType<typeof setTimeout> | undefined;
+  let resultRequest = 0;
   let controller = new AbortController();
   const pending = () =>
     result?.status === 'queued' || result?.status === 'running';
   async function refresh() {
-    if (!active || refreshing || loadingMore) return;
+    if (!active) return;
+    if (refreshing || loadingMore) {
+      refreshQueued = true;
+      return;
+    }
+    refreshQueued = false;
     const signal = controller.signal;
     refreshing = true;
     try {
@@ -47,6 +58,7 @@
         page.length === 20 &&
         !page.some((record) => known.has(record.id))
       );
+      if (signal.aborted) return;
       const fresh = new Map(newer.map((record) => [record.id, record]));
       if (!records.length) hasMore = page.length === 20;
       if (page.length < 20) hasMore = false;
@@ -61,24 +73,13 @@
         result = null;
       }
       if (selected && (!result || pending())) {
-        const updated = await api<Command>(`commands/${selected}`, { signal });
-        if (selected === updated.id) {
-          result = updated;
-          records = records.map((item) =>
-            item.id === updated.id
-              ? {
-                  ...item,
-                  status: updated.status,
-                  exit_code: updated.exit_code,
-                }
-              : item,
-          );
-        }
+        await readResult(selected, signal);
       }
     } catch (error) {
       if (!signal.aborted) onerror((error as Error).message);
     } finally {
       refreshing = false;
+      if (refreshQueued) void refresh();
     }
   }
   async function loadMore() {
@@ -91,6 +92,7 @@
         `nodes/${node.id}/commands?offset=${records.length}`,
         { signal },
       );
+      if (signal.aborted) return;
       const known = new Set(records.map((record) => record.id));
       records = [...records, ...page.filter((record) => !known.has(record.id))];
       hasMore = page.length === 20;
@@ -100,6 +102,19 @@
       onerror((error as Error).message);
     } finally {
       loadingMore = false;
+      if (refreshQueued) void refresh();
+    }
+  }
+  async function readResult(id: string, signal: AbortSignal) {
+    const request = ++resultRequest;
+    const record = await api<Command>(`commands/${id}`, { signal });
+    if (!signal.aborted && selected === id && request === resultRequest) {
+      result = record;
+      records = records.map((item) =>
+        item.id === id
+          ? { ...item, status: record.status, exit_code: record.exit_code }
+          : item,
+      );
     }
   }
   async function select(id: string) {
@@ -108,15 +123,7 @@
     if (!selected) return;
     const signal = controller.signal;
     try {
-      const record = await api<Command>(`commands/${id}`, { signal });
-      if (selected === id) {
-        result = record;
-        records = records.map((item) =>
-          item.id === id
-            ? { ...item, status: record.status, exit_code: record.exit_code }
-            : item,
-        );
-      }
+      await readResult(id, signal);
     } catch (error) {
       if (signal.aborted) return;
       if (selected === id) selected = '';
@@ -147,10 +154,30 @@
     if (!active) return;
     const requests = new AbortController();
     controller = requests;
-    untrack(() => void refresh());
-    const timer = setInterval(() => void refresh(), 2000);
+    const unsubscribe = manager.subscribe(
+      { topic: 'commands', node_id: nodeID },
+      (event) => {
+        if (event.type !== 'output') {
+          void refresh();
+        } else if (
+          event.id &&
+          event.id === selected &&
+          outputTimer === undefined
+        ) {
+          outputTimer = setTimeout(() => {
+            outputTimer = undefined;
+            if (selected !== event.id) return;
+            void readResult(event.id, requests.signal).catch((failure) => {
+              if (!requests.signal.aborted) onerror((failure as Error).message);
+            });
+          }, 250);
+        }
+      },
+    );
     return () => {
-      clearInterval(timer);
+      unsubscribe();
+      clearTimeout(outputTimer);
+      outputTimer = undefined;
       requests.abort();
     };
   });

@@ -7,7 +7,8 @@
     node: Node;
     entry: FileEntry;
     kind: FileKind;
-    ready: boolean;
+    loading: boolean;
+    link?: { path: string; pending: boolean; error?: string };
     dirty: boolean;
     saving: boolean;
     missing?: boolean;
@@ -20,20 +21,14 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { sortableTabs, reorderTabs } from '@/shared/tab-sort';
   import { scrollTabs } from '@/shared/tab-scroll';
-  import '@interactjs/auto-start';
-  import '@interactjs/actions/drag';
-  import interact from '@interactjs/interact';
+  import { dragWindow } from '@/shared/window-drag';
   import {
-    Minus,
     X,
-    Maximize2,
-    Minimize2,
-    FileJson,
+    SquarePen,
     FileText,
     EyeOff,
     Download,
-    Pin,
-    PinOff,
+    LoaderCircle,
   } from '@lucide/svelte';
   import type { Transfers } from '@/features/transfers/store.svelte';
   import type { Confirmation } from '@/shared/components/ConfirmDialog.svelte';
@@ -42,7 +37,10 @@
   const editors = new SvelteMap<number, FileEditor>();
   const previews = new SvelteMap<number, MediaPreview>();
   import EditorMenu from './EditorMenu.svelte';
-  import EditorNotice from './EditorNotice.svelte';
+  import FileLoadFeedback from './FileLoadFeedback.svelte';
+  import TabContextMenu from '@/shared/components/TabContextMenu.svelte';
+  import TabOverflowMenu from '@/shared/components/TabOverflowMenu.svelte';
+  import WindowHeading from '@/shared/components/WindowHeading.svelte';
   import TextFormatMenu from './TextFormatMenu.svelte';
   import { t, bytes } from '@/shared/settings.svelte';
   let {
@@ -51,7 +49,7 @@
     selected,
     manager,
     onselect,
-    onready,
+    onresolve,
     onminimize,
     onremove,
     onclose,
@@ -63,9 +61,9 @@
     selected: number;
     manager: Transfers;
     onselect: (id: number) => void;
-    onready: (file: OpenedFile) => void;
+    onresolve: (file: OpenedFile) => void;
     onminimize: () => void;
-    onremove: (id: number) => void;
+    onremove: (ids: number[]) => void;
     onclose: () => void;
     onrequestconfirm: (request: Confirmation) => void;
     onerror: (message: string) => void;
@@ -87,9 +85,45 @@
   );
   const editor = $derived(current ? editors.get(current.id) : undefined);
   const status = $derived(editor?.status());
-  function reload() {
-    if (editor) editor.reload();
-    else if (current) previews.get(current.id)?.reload();
+  const ids = $derived(files.map((file) => file.id));
+  let editorModule =
+    $state.raw<Promise<typeof import('./FileEditor.svelte')>>();
+  let editorModuleFailed = $state(false);
+  function loadEditorModule() {
+    editorModuleFailed = false;
+    editorModule = import('./FileEditor.svelte').catch((failure) => {
+      editorModuleFailed = true;
+      throw failure;
+    });
+  }
+  $effect(() => {
+    if (editorModuleFailed) {
+      for (const file of files)
+        if (file.kind === 'text' && !file.link?.pending) file.loading = false;
+    } else if (
+      !editorModule &&
+      files.some((file) => file.kind === 'text' && !file.link?.pending)
+    ) {
+      loadEditorModule();
+    }
+  });
+  function canReload(file: OpenedFile) {
+    return (
+      file.node.online &&
+      !file.loading &&
+      !file.saving &&
+      (file.link?.pending || file.kind !== 'download')
+    );
+  }
+  function reload(id: number) {
+    const file = files.find((item) => item.id === id);
+    if (!file || !canReload(file)) return;
+    if (file.link?.pending) onresolve(file);
+    else if (editors.has(id)) editors.get(id)!.reload();
+    else if (file.kind === 'text') {
+      file.loading = true;
+      loadEditorModule();
+    } else previews.get(id)?.reload();
   }
   function download() {
     if (current)
@@ -97,31 +131,10 @@
         .download(current.node, [current.entry])
         .catch((failure) => onerror(failure.message));
   }
-  const shown = $derived(
-    visible && (current?.kind !== 'text' || current.ready),
-  );
-  function movable(element: HTMLElement, enabled: boolean) {
-    const drag = interact(element)
-      .styleCursor(false)
-      .draggable({
-        enabled,
-        allowFrom: '.window-drag-area',
-        ignoreFrom: '.toolbar-actions,button',
-        listeners: {
-          move(event) {
-            rectangle.x += event.dx;
-            rectangle.y += event.dy;
-          },
-        },
-      });
-    return {
-      update(enabled: boolean) {
-        drag.draggable({ enabled });
-      },
-      destroy() {
-        drag.unset();
-      },
-    };
+  const shown = $derived(visible);
+  function move(dx: number, dy: number) {
+    rectangle.x += dx;
+    rectangle.y += dy;
   }
   function outside(event: PointerEvent) {
     const target = event.target as Element;
@@ -194,23 +207,27 @@
   style:top={maximized ? '8px' : rectangle.y + 'px'}
   style:width={maximized ? 'calc(100vw - 16px)' : rectangle.width + 'px'}
   style:height={maximized ? 'calc(100dvh - 16px)' : rectangle.height + 'px'}
-  use:movable={!maximized && shown}
+  use:dragWindow={{ enabled: !maximized && shown, move }}
 >
-  <div class="file-window-heading window-drag-area">
-    <FileJson size={17} aria-hidden="true" />
-    <h2 id="file-window-title" class="dialog-title">{t('editor')}</h2>
+  <WindowHeading
+    titleId="file-window-title"
+    title={t('editor')}
+    icon={SquarePen}
+    bind:pinned
+    bind:maximized
+    {onminimize}
+    {onclose}
+  >
     <EditorMenu
       {editor}
-      online={!!current?.node.online}
-      canReload={editor
-        ? !!status?.canReload
-        : !!current?.node.online && current.kind !== 'download'}
+      online={!!current?.node.online && !current?.link?.pending}
+      canReload={current ? !!canReload(current) : false}
       bind:pinned
       bind:maximized
       bind:wrapLines
       bind:showLineNumbers
       bind:fontSize
-      onreload={reload}
+      onreload={() => current && reload(current.id)}
       ondownload={download}
       {onminimize}
       {onclose}
@@ -218,101 +235,83 @@
     <p id="file-window-description" class="sr-only">
       {t('fileWindowDescription')}
     </p>
-    <div class="toolbar-actions">
-      <button
-        class="icon-button"
-        class:active={pinned}
-        aria-label={t(pinned ? 'unpinWindow' : 'pinWindow')}
-        title={t(pinned ? 'unpinWindow' : 'pinWindow')}
-        aria-pressed={pinned}
-        onclick={() => (pinned = !pinned)}
-      >
-        {#if pinned}<PinOff size={15} />{:else}<Pin size={15} />{/if}
-      </button>
-      <button
-        class="icon-button"
-        aria-label={t('minimizeWindow')}
-        title={t('minimizeWindow')}
-        onclick={onminimize}
-      >
-        <Minus size={15} />
-      </button>
-      <button
-        class="icon-button"
-        aria-label={t(maximized ? 'restoreWindow' : 'maximizeWindow')}
-        title={t(maximized ? 'restoreWindow' : 'maximizeWindow')}
-        onclick={() => (maximized = !maximized)}
-      >
-        {#if maximized}<Minimize2 size={15} />{:else}<Maximize2
-            size={15}
-          />{/if}
-      </button>
-      <button
-        class="icon-button"
-        aria-label={t('closeFiles')}
-        title={t('closeFiles')}
-        onclick={onclose}
-      >
-        <X size={15} />
-      </button>
+  </WindowHeading>
+  <div class="file-window-tabs">
+    <div
+      class="tabs-scroll"
+      onwheel={scrollTabs}
+      use:sortableTabs={(from, to) => (files = reorderTabs(files, from, to))}
+      role="tablist"
+      aria-label={t('openFiles')}
+    >
+      {#if !files.length}<div class="workspace-tab tab-wrap active">
+          <button
+            class="file-tab-title tab-title"
+            role="tab"
+            id="file-tab-welcome"
+            aria-controls="file-content-welcome"
+            aria-selected="true"
+          >
+            <span>{t('welcome')}</span>
+          </button>
+        </div>{/if}
+      {#each files as file, index (file.id)}<TabContextMenu
+          id={file.id}
+          {index}
+          {ids}
+          active={file.id === current?.id}
+          reloadLabel="reload"
+          canReload={!!canReload(file)}
+          insideEditor
+          onreload={reload}
+          onclose={onremove}
+        >
+          <button
+            class="file-tab-title tab-title"
+            class:dirty={file.dirty}
+            aria-label={`${file.entry.name}(${file.node.name})${file.dirty ? ' · ' + t('unsavedChanges') : ''}`}
+            role="tab"
+            id={`file-tab-${file.id}`}
+            aria-controls={`file-content-${file.id}`}
+            aria-selected={file.id === current?.id}
+            tabindex={file.id === current?.id ? 0 : -1}
+            onclick={() => onselect(file.id)}
+            title={`${file.node.name} · ${file.entry.path}`}
+            onkeydown={(e) => {
+              if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                const next =
+                  files[
+                    (index + (e.key === 'ArrowRight' ? 1 : files.length - 1)) %
+                      files.length
+                  ];
+                onselect(next.id);
+                document.getElementById(`file-tab-${next.id}`)?.focus();
+              }
+            }}
+          >
+            <span>{file.entry.name}({file.node.name})</span>
+          </button><button
+            class="tab-close"
+            aria-label={`${t('close')} ${file.entry.name}`}
+            onclick={() => onremove([file.id])}
+          >
+            <X size={13} />
+          </button>
+          {#if file.saving}<span
+              class="file-tab-saving"
+              aria-label={t('savingFile')}
+            >
+              <LoaderCircle class="spin" size={14} aria-hidden="true" />
+            </span>{/if}
+        </TabContextMenu>{/each}
     </div>
-  </div>
-  <div
-    class="tabs-scroll file-window-tabs"
-    onwheel={scrollTabs}
-    use:sortableTabs={(from, to) => (files = reorderTabs(files, from, to))}
-    role="tablist"
-    aria-label={t('openFiles')}
-  >
-    {#if !files.length}<div class="workspace-tab tab-wrap active">
-        <button
-          class="file-tab-title tab-title"
-          role="tab"
-          id="file-tab-welcome"
-          aria-controls="file-content-welcome"
-          aria-selected="true"
-        >
-          <span>{t('welcome')}</span>
-        </button>
-      </div>{/if}
-    {#each files as file, index (file.id)}<div
-        class="workspace-tab tab-wrap"
-        data-tab-id={file.id}
-        class:active={file.id === current?.id}
-      >
-        <button
-          class="file-tab-title tab-title"
-          class:dirty={file.dirty}
-          aria-label={`${file.entry.name}(${file.node.name})${file.dirty ? ' · ' + t('unsavedChanges') : ''}`}
-          role="tab"
-          id={`file-tab-${file.id}`}
-          aria-controls={`file-content-${file.id}`}
-          aria-selected={file.id === current?.id}
-          tabindex={file.id === current?.id ? 0 : -1}
-          onclick={() => onselect(file.id)}
-          title={`${file.node.name} · ${file.entry.path}`}
-          onkeydown={(e) => {
-            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-              e.preventDefault();
-              const next =
-                files[
-                  (index + (e.key === 'ArrowRight' ? 1 : files.length - 1)) %
-                    files.length
-                ];
-              onselect(next.id);
-              document.getElementById(`file-tab-${next.id}`)?.focus();
-            }
-          }}
-        >
-          <span>{file.entry.name}({file.node.name})</span>
-        </button><button
-          class="tab-close"
-          aria-label={`${t('close')} ${file.entry.name}`}
-          onclick={() => onremove(file.id)}
-        >
-          <X size={13} />
-        </button>
-      </div>{/each}
+    <TabOverflowMenu
+      {ids}
+      active={current?.id}
+      onclose={onremove}
+      insideEditor
+    />
   </div>
   {#if !files.length}<div
       class="file-window-content"
@@ -332,29 +331,36 @@
       aria-labelledby={`file-tab-${file.id}`}
       hidden={file.id !== current?.id}
     >
-      {#if file.kind === 'text'}
-        {#await import('@/features/files/editor/FileEditor.svelte')}<EditorNotice
-            message={t('loading')}
-          />{:then editor}<editor.default
-            bind:this={
-              () => editors.get(file.id),
-              (value) => {
-                if (value) editors.set(file.id, value);
-                else editors.delete(file.id);
+      {#if file.link?.pending}
+        <FileLoadFeedback
+          error={file.link.error}
+          onretry={() => reload(file.id)}
+          disabled={!file.node.online}
+        />
+      {:else if file.kind === 'text'}
+        {#if editorModule}
+          {#await editorModule}<FileLoadFeedback />{:then editor}<editor.default
+              bind:this={
+                () => editors.get(file.id),
+                (value) => {
+                  if (value) editors.set(file.id, value);
+                  else editors.delete(file.id);
+                }
               }
-            }
-            {file}
-            {wrapLines}
-            {showLineNumbers}
-            {fontSize}
-            active={shown && file.id === current?.id}
-            {manager}
-            {onrequestconfirm}
-            onready={() => onready(file)}
-          />{:catch failure}<EditorNotice
-            message={failure.message}
-            tone="error"
-          />{/await}
+              {file}
+              {wrapLines}
+              {showLineNumbers}
+              {fontSize}
+              active={shown && file.id === current?.id}
+              {manager}
+              {onrequestconfirm}
+              {onerror}
+            />{:catch failure}<FileLoadFeedback
+              error={failure.message}
+              onretry={() => reload(file.id)}
+              disabled={!file.node.online}
+            />{/await}
+        {:else}<FileLoadFeedback />{/if}
       {:else if file.kind === 'download'}
         <div class="editor-empty-state">
           <EyeOff size={48} strokeWidth={1.25} aria-hidden="true" />
@@ -364,7 +370,7 @@
             disabled={!file.node.online}
             onclick={download}
           >
-            <Download size={14} aria-hidden="true" />{t('downloadFile')}
+            <Download size={14} aria-hidden="true" />{t('download')}
           </button>
         </div>
       {:else}<MediaPreview
@@ -385,13 +391,15 @@
     {#if current}<div class="editor-status-left">
         <span class="editor-save-state" class:dirty={current?.dirty}>
           {t(
-            current?.kind !== 'text' || status?.readonly
-              ? 'readOnly'
-              : current?.saving
-                ? 'savingFile'
-                : current?.dirty
-                  ? 'unsavedChanges'
-                  : 'savedFile',
+            current.loading
+              ? 'loadingFile'
+              : current?.kind !== 'text' || status?.readonly
+                ? 'readOnly'
+                : current?.saving
+                  ? 'savingFile'
+                  : current?.dirty
+                    ? 'unsavedChanges'
+                    : 'savedFile',
           )}
         </span>
         <span
@@ -405,7 +413,7 @@
         </span>
       </div>
       <div class="editor-status-right">
-        {#if current?.kind === 'text'}
+        {#if status?.loaded && current.kind === 'text'}
           <span>
             {t('editorLine').replace('{line}', String(status?.line || 1))}
           </span>
@@ -414,9 +422,9 @@
         {/if}
         <button
           class="icon-button"
-          aria-label={t('downloadFiles')}
-          title={t('downloadFiles')}
-          disabled={!current?.node.online}
+          aria-label={t('download')}
+          title={t('download')}
+          disabled={!current.node.online || current.link?.pending}
           onclick={download}
         >
           <Download size={14} />

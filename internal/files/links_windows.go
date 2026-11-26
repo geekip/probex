@@ -109,6 +109,9 @@ func writeShortcut(path, target string) error {
 	return err
 }
 
+// Directory metadata omits the link count. Read it from a handle when requested.
+func hardLinksFromInfo(os.FileInfo) uint64 { return 0 }
+
 func hardLinks(path string, _ os.FileInfo) (uint64, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
