@@ -6,14 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestBooleanArgs(t *testing.T) {
-	args := []string{"--allow-registration", "false", "--auto-approve", "false", "--db", "test.db", "--auto-approve=true"}
-	want := []string{"--allow-registration=false", "--auto-approve=false", "--db", "test.db", "--auto-approve=true"}
+	args := []string{"--allow-registration", "false", "--auto-approve", "false", "--db", "test.db", "--auto-approve=true", "--enable-agent", "false"}
+	want := []string{"--allow-registration=false", "--auto-approve=false", "--db", "test.db", "--auto-approve=true", "--enable-agent=false"}
 	if got := booleanArgs(args); !reflect.DeepEqual(got, want) {
 		t.Fatal(got)
 	}
@@ -37,6 +38,17 @@ func TestSavedAdminToken(t *testing.T) {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal(info, err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0640); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := savedAdminToken(path, false); err == nil {
+			t.Fatal("accepted a token readable by another account")
+		}
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)

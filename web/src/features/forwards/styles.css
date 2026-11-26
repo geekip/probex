@@ -1,0 +1,145 @@
+.forwards-panel {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.forwards-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  padding: 6px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.forwards-heading .quiet-button {
+  min-height: 26px;
+  height: 26px;
+  padding: 3px 8px;
+  gap: 5px;
+  font-size: 11px;
+}
+.forwards-heading .icon-button {
+  width: 23px;
+  min-width: 23px;
+  height: 26px;
+}
+.forwards-list {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: auto;
+  gap: 8px;
+  padding: 8px;
+}
+.forward-card {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px;
+  background: var(--surface);
+  min-width: 0;
+}
+.forward-card header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.forward-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.forward-protocols {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-right: auto;
+}
+.forward-protocol {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.forward-protocol[data-status='ready'] {
+  color: var(--success);
+  border-color: var(--success-soft);
+  background: var(--success-soft);
+}
+.forward-protocol[data-status='target_error'],
+.forward-protocol[data-status='listen_error'] {
+  color: var(--error);
+}
+.forward-card header .icon-button {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+}
+.forward-warning {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 6px 0 0;
+  color: var(--error);
+  font-size: 11px;
+}
+.forward-card dl {
+  margin: 10px 0 0;
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+}
+.forward-card dl > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+}
+.forward-card dt {
+  color: var(--muted);
+}
+.forward-card dd {
+  margin: 0;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.forward-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.forward-form > input,
+.forward-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  min-width: 0;
+  font-size: 12px;
+}
+.forward-select:focus-visible {
+  border-color: var(--focus-border);
+  outline: none;
+}
+.forward-protocol-menu .menu-item {
+  justify-content: space-between;
+}
+.forward-form label {
+  font-size: 12px;
+  margin: 0;
+}
+.forward-form .dialog-actions {
+  margin-top: 10px;
+}

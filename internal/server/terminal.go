@@ -2,9 +2,10 @@ package server
 
 import (
 	"context"
-	"fmt"
+	"io"
 	"net/http"
 	"probex/internal/protocol"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -12,75 +13,138 @@ import (
 )
 
 type terminalPeer struct {
-	id   string
-	conn *websocket.Conn
+	id     string
+	cancel context.CancelFunc
+	events chan protocol.Message
+	exit   chan protocol.Message
 }
 
+func (t *terminalPeer) event(m protocol.Message) {
+	select {
+	case t.events <- m:
+	default:
+		t.cancel()
+	}
+}
 func (s *Server) terminal(w http.ResponseWriter, r *http.Request, nodeID string) {
 	if r.Header.Get("Origin") != "" && !sameOrigin(r) {
 		problem(w, 403, "origin rejected")
 		return
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	t := &terminalPeer{id: protocol.RandomID(), cancel: cancel, events: make(chan protocol.Message, 16), exit: make(chan protocol.Message, 1)}
+	sessionID, _ := ctx.Value(sessionKey{}).(string)
 	s.mu.Lock()
 	p := s.peers[nodeID]
-	if p == nil || p.terminal != nil {
+	if s.closed || p == nil || p.ctx.Err() != nil || len(p.terminals) >= protocol.MaxTerminals {
 		s.mu.Unlock()
-		problem(w, 409, "node offline or terminal busy")
+		problem(w, 409, "node offline or terminal limit reached (8)")
 		return
+	}
+	expiry := s.sessions[sessionID]
+	if sessionID != "" && !time.Now().Before(expiry) {
+		s.mu.Unlock()
+		problem(w, 401, "login expired")
+		return
+	}
+	p.terminals[t.id] = t
+	s.agents.Add(1)
+	s.mu.Unlock()
+	defer s.agents.Done()
+	defer func() { s.mu.Lock(); delete(p.terminals, t.id); s.mu.Unlock() }()
+	stopPeer := context.AfterFunc(p.ctx, cancel)
+	defer stopPeer()
+	if sessionID != "" {
+		var deadline context.CancelFunc
+		ctx, deadline = context.WithDeadline(ctx, expiry)
+		defer deadline()
 	}
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
-		s.mu.Unlock()
 		return
 	}
-	t := &terminalPeer{id: protocol.RandomID(), conn: conn}
-	p.terminal = t
-	sessionID, _ := r.Context().Value(sessionKey{}).(string)
-	ctx := r.Context()
-	cancel := func() {}
+	defer conn.CloseNow()
+	conn.SetReadLimit(protocol.MaxMessage)
+	stopSocket := context.AfterFunc(ctx, func() { conn.CloseNow() })
+	defer stopSocket()
+	s.mu.Lock()
 	if sessionID != "" {
-		ctx, cancel = context.WithDeadline(ctx, s.sessions[sessionID])
+		if _, ok := s.sessions[sessionID]; !ok {
+			s.mu.Unlock()
+			return
+		}
 		s.terminals[conn] = sessionID
 	}
 	s.mu.Unlock()
-	defer cancel()
-	defer conn.CloseNow()
-	conn.SetReadLimit(protocol.MaxMessage)
-	heartbeat, stopHeartbeat := context.WithCancel(ctx)
-	defer stopHeartbeat()
+	defer func() { s.mu.Lock(); delete(s.terminals, conn); s.mu.Unlock() }()
+	var workers sync.WaitGroup
+	// Stop all writers before the handler returns, including a blocked browser.
+	defer func() { cancel(); conn.CloseNow(); workers.Wait() }()
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		ticker := time.NewTicker(20 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-heartbeat.Done():
+			case <-ctx.Done():
 				return
+			case m := <-t.events:
+				if err := send(ctx, conn, m); err != nil {
+					cancel()
+					return
+				}
 			case <-ticker.C:
-				ping, done := context.WithTimeout(heartbeat, 10*time.Second)
+				ping, done := context.WithTimeout(ctx, 10*time.Second)
 				err := conn.Ping(ping)
 				done()
 				if err != nil {
-					conn.CloseNow()
+					cancel()
 					return
 				}
 			}
 		}
 	}()
-	defer func() {
-		s.mu.Lock()
-		delete(s.terminals, conn)
-		stillActive := p.terminal == t
-		s.mu.Unlock()
-		if stillActive {
-			if err := send(context.Background(), p.conn, protocol.Message{Type: "term_close", ID: t.id}); err != nil {
-				p.conn.CloseNow()
-			}
-		}
-	}()
-	if err := send(context.Background(), p.conn, protocol.Message{Type: "term_open", ID: t.id, Cols: 80, Rows: 24}); err != nil {
-		p.conn.CloseNow()
+	stream, err := s.openStream(ctx, nodeID, protocol.Message{Purpose: "terminal", Target: t.id, Cols: 80, Rows: 24, CWD: r.URL.Query().Get("cwd")})
+	if err != nil {
+		send(ctx, conn, protocol.Message{Type: "term_exit", ID: t.id, Error: err.Error()})
 		return
 	}
+	defer stream.Close()
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		data := make([]byte, protocol.ChunkSize)
+		for {
+			n, err := stream.Read(data)
+			if n > 0 {
+				if err := send(ctx, conn, protocol.Message{Type: "term_output", ID: t.id, Data: data[:n]}); err != nil {
+					cancel()
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					cancel()
+					return
+				}
+				break
+			}
+		}
+		select {
+		case result := <-t.exit:
+			if err := stream.CloseWrite(); err != nil {
+				cancel()
+				return
+			}
+			if err := send(ctx, conn, result); err == nil {
+				conn.Close(websocket.StatusNormalClosure, "shell exited")
+			}
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	for {
 		var m protocol.Message
 		if err := wsjson.Read(ctx, conn, &m); err != nil {
@@ -92,7 +156,10 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, nodeID string)
 				conn.Close(websocket.StatusPolicyViolation, "input too large")
 				return
 			}
-			m.Type = "term_input"
+			if _, err := stream.Write(m.Data); err != nil {
+				return
+			}
+			continue
 		case "resize":
 			if m.Cols < 1 || m.Cols > 1000 || m.Rows < 1 || m.Rows > 1000 {
 				conn.Close(websocket.StatusPolicyViolation, "invalid dimensions")
@@ -106,7 +173,10 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, nodeID string)
 			return
 		}
 		m.ID = t.id
-		if err := send(context.Background(), p.conn, m); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := send(p.ctx, p.conn, m); err != nil {
 			p.conn.CloseNow()
 			return
 		}
@@ -114,29 +184,19 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, nodeID string)
 }
 func (s *Server) terminalMessage(p *peer, m protocol.Message) error {
 	s.mu.Lock()
-	t := p.terminal
-	s.mu.Unlock()
-	if t == nil || t.id != m.ID {
-		return fmt.Errorf("unexpected terminal result")
-	}
-	if m.Type == "term_started" {
-		return nil
-	}
-	if m.Type == "term_output" {
-		if err := send(context.Background(), t.conn, m); err != nil {
-			t.conn.CloseNow()
-		}
-		return nil
-	}
-	s.mu.Lock()
-	if p.terminal == t {
-		p.terminal = nil
+	t := p.terminals[m.ID]
+	if t != nil && m.Type == "term_exit" {
+		delete(p.terminals, m.ID)
 	}
 	s.mu.Unlock()
-	if err := send(context.Background(), t.conn, m); err != nil {
-		t.conn.CloseNow()
+	// Results may cross cancellation or peer replacement in flight.
+	if t == nil {
+		return nil
+	}
+	if m.Type == "term_exit" {
+		t.exit <- m
 	} else {
-		t.conn.Close(websocket.StatusNormalClosure, "shell exited")
+		t.event(m)
 	}
 	return nil
 }

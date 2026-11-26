@@ -38,6 +38,14 @@ func TestGeneratedTLSAndCAExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rootBlock, _ := pem.Decode(rootData)
+	parsedRoot, err := x509.ParseCertificate(rootBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pair.Leaf.AuthorityKeyId) == 0 || !bytes.Equal(pair.Leaf.AuthorityKeyId, parsedRoot.SubjectKeyId) {
+		t.Fatal("leaf must identify its issuing CA")
+	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(rootData) {
 		t.Fatal("invalid root")

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"probex/internal/protocol"
+	"runtime"
 	"strings"
 )
 
@@ -26,9 +27,12 @@ func booleanArgs(args []string) []string {
 	result := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if (arg == "--allow-registration" || arg == "--auto-approve" || arg == "-allow-registration" || arg == "-auto-approve") && i+1 < len(args) && (args[i+1] == "false" || args[i+1] == "true") {
-			arg += "=" + args[i+1]
-			i++
+		switch arg {
+		case "-allow-registration", "--allow-registration", "-auto-approve", "--auto-approve", "-enable-agent", "--enable-agent":
+			if i+1 < len(args) && (args[i+1] == "false" || args[i+1] == "true") {
+				arg += "=" + args[i+1]
+				i++
+			}
 		}
 		result = append(result, arg)
 	}
@@ -36,7 +40,7 @@ func booleanArgs(args []string) []string {
 }
 
 func savedAdminToken(path string, create bool) (string, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) && create {
 		token := protocol.RandomID()
 		file, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -54,7 +58,19 @@ func savedAdminToken(path string, create bool) (string, error) {
 		return token, closeErr
 	}
 	if err != nil {
-		return "", fmt.Errorf("read management token %s: %w; use --admin-token or PROBEX_ADMIN_TOKEN", path, err)
+		return "", fmt.Errorf("read management token %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+		return "", fmt.Errorf("management token file %s must be a regular file accessible only to its owner", path)
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("read management token %s: %w", path, err)
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
@@ -92,7 +108,6 @@ func managementClient(base, ca string) (*http.Client, error) {
 			}
 		}
 	}
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	return client, nil
 }
 

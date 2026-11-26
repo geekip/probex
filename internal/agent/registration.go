@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"probex/internal/protocol"
 	"strings"
 	"time"
@@ -65,14 +67,14 @@ func awaitApproval(ctx context.Context, c Config, id *identity, client *http.Cli
 		if node.Admission != "approved" && node.Admission != "review" {
 			return &permanentError{fmt.Errorf("registration %s", node.Admission)}
 		}
-		id.ID = node.ID
-		id.Enrolled = node.Admission == "approved"
-		saved, err := json.Marshal(id)
-		if err != nil {
-			return &permanentError{err}
-		}
-		if err := os.WriteFile(c.State, saved, 0600); err != nil {
-			return &permanentError{fmt.Errorf("save registration identity %s: %w", c.State, err)}
+		next := *id
+		next.ID = node.ID
+		next.Enrolled = node.Admission == "approved"
+		if next != *id {
+			if err := saveIdentity(c.State, next); err != nil {
+				return &permanentError{fmt.Errorf("save registration identity %s: %w", c.State, err)}
+			}
+			*id = next
 		}
 		if id.Enrolled {
 			return nil
@@ -90,4 +92,29 @@ func awaitApproval(ctx context.Context, c Config, id *identity, client *http.Cli
 		case <-timer.C:
 		}
 	}
+}
+
+func saveIdentity(path string, id identity) (err error) {
+	data, err := json.Marshal(id)
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".probex-identity-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, os.Remove(name))
+		}
+	}()
+	_, writeErr := file.Write(data)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }

@@ -31,21 +31,34 @@ type Config struct {
 	Port              int
 	CA                string
 	EnrollmentTTL     time.Duration
+	LocalNode         bool
 }
 type peer struct {
-	conn     *websocket.Conn
-	command  string
-	terminal *terminalPeer
+	ctx       context.Context
+	streams   map[string]*dataStream
+	conn      *websocket.Conn
+	command   string
+	terminals map[string]*terminalPeer
 }
 type Server struct {
-	store     *Store
-	config    Config
-	mu        sync.Mutex
-	peers     map[string]*peer
-	sessions  map[string]time.Time
-	terminals map[*websocket.Conn]string
-	agents    sync.WaitGroup
-	closed    bool
+	filesMu      sync.Mutex
+	fileOwners   map[string]*fileOwner
+	fileTasks    map[string]*fileTask
+	downloads    map[string]*downloadTask
+	forwardsMu   sync.Mutex
+	forwardOpsMu sync.Mutex
+	forwards     map[string]*forwardRuntime
+	store        *Store
+	config       Config
+	mu           sync.Mutex
+	peers        map[string]*peer
+	sessions     map[string]time.Time
+	terminals    map[*websocket.Conn]string
+	agents       sync.WaitGroup
+	localCancel  context.CancelFunc
+	localReady   chan struct{}
+	localDone    chan struct{}
+	closed       bool
 }
 
 func New(store *Store, config Config) (*Server, error) {
@@ -58,12 +71,28 @@ func New(store *Store, config Config) (*Server, error) {
 	if config.EnrollmentTTL < 0 {
 		return nil, fmt.Errorf("enrollment TTL must be positive")
 	}
-	return &Server{store: store, config: config, peers: map[string]*peer{}, sessions: map[string]time.Time{}, terminals: map[*websocket.Conn]string{}}, nil
+	s := &Server{store: store, config: config, peers: map[string]*peer{}, sessions: map[string]time.Time{}, terminals: map[*websocket.Conn]string{}, forwards: map[string]*forwardRuntime{}, fileOwners: map[string]*fileOwner{}, fileTasks: map[string]*fileTask{}, downloads: map[string]*downloadTask{}}
+	list, err := store.forwards(config.LocalNode)
+	if err != nil {
+		return nil, err
+	}
+	if config.LocalNode {
+		if err := s.startLocalNode(); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	for _, f := range list {
+		sockets, err := listenForward(f, forwardSockets{})
+		s.startForward(f, sockets, err)
+	}
+	return s, nil
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("GET /agent", s.agent)
+	mux.HandleFunc("GET /agent/data", s.agentData)
 	mux.HandleFunc("POST /register", s.registration)
 	mux.HandleFunc("GET /registration", s.registration)
 	mux.HandleFunc("POST /api/login", s.login)
@@ -169,7 +198,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 				problem(w, 401, "session expired")
 				return
 			}
-			if r.Method != "GET" && !sameOrigin(r) {
+			if r.Method != "GET" && r.Method != "HEAD" && !sameOrigin(r) {
 				problem(w, 403, "origin rejected")
 				return
 			}
@@ -180,6 +209,18 @@ func (s *Server) auth(next http.Handler) http.Handler {
 }
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")
+	if path == "file-sessions" && r.Method == "GET" {
+		s.fileSession(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "uploads/") {
+		s.fileUploadAPI(w, r, strings.TrimPrefix(path, "uploads/"))
+		return
+	}
+	if path == "forwards" || strings.HasPrefix(path, "forwards/") {
+		s.forwardAPI(w, r, path)
+		return
+	}
 	if path == "nodes" && r.Method == "POST" {
 		s.issueEnrollment(w, r, "")
 		return
@@ -199,6 +240,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			s.mu.Unlock()
+			s.stopFileSessions(c.Value)
 			for _, conn := range terminals {
 				conn.CloseNow()
 			}
@@ -208,7 +250,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "nodes" && r.Method == "GET" {
-		nodes, err := s.store.nodes()
+		nodes, err := s.store.nodes(s.config.LocalNode)
 		if err != nil {
 			s.databaseError(w, err)
 			return
@@ -219,6 +261,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		writeJSON(w, 200, nodes)
+		return
+	}
+	if strings.HasPrefix(path, "downloads/") {
+		s.downloadAPI(w, r, strings.TrimPrefix(path, "downloads/"))
 		return
 	}
 	parts := strings.Split(path, "/")
@@ -236,6 +282,15 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := parts[1]
+	if !s.nodeEnabled(id) {
+		problem(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if id == protocol.LocalNodeID && (len(parts) == 2 && r.Method == "DELETE" ||
+		len(parts) == 3 && parts[2] == "enrollment") {
+		problem(w, http.StatusForbidden, "operation unavailable for the built-in node")
+		return
+	}
 	n, err := s.store.node(id)
 	if err != nil {
 		s.lookupError(w, err)
@@ -281,6 +336,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			writeJSON(w, 200, n.Node)
 		case "DELETE":
+			s.forwardOpsMu.Lock()
+			defer s.forwardOpsMu.Unlock()
 			s.mu.Lock()
 			err = s.store.deleteNode(id)
 			if err != nil {
@@ -292,20 +349,41 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			delete(s.peers, id)
 			if p != nil {
 				p.command = ""
-				if p.terminal != nil {
-					p.terminal.conn.CloseNow()
-					p.terminal = nil
+				for _, t := range p.terminals {
+					t.cancel()
 				}
 			}
 			s.mu.Unlock()
 			if p != nil {
 				p.conn.Close(websocket.StatusPolicyViolation, "node revoked")
 			}
+			s.removeNodeFileTasks(id)
+			s.stopNodeForwards(id)
 			writeJSON(w, 200, map[string]bool{"ok": true})
 		default:
 			problem(w, 405, "method not allowed")
 		}
 		return
+	}
+	if len(parts) >= 3 {
+		filePath := strings.Join(parts[2:], "/")
+		if filePath == "text" {
+			s.textAPI(w, r, id)
+			return
+		}
+		if filePath == "downloads" && r.Method == "POST" {
+			s.createDownload(w, r, id)
+			return
+		}
+		if filePath == "uploads" && r.Method == "POST" {
+			s.createFileUpload(w, r, id)
+			return
+		}
+		switch filePath {
+		case "files", "stat", "resolve", "links", "file", "preview", "directories", "files/rename", "files/copy":
+			s.fileProxy(w, r, id, filePath)
+			return
+		}
 	}
 	if len(parts) == 3 && parts[2] == "commands" {
 		switch r.Method {
@@ -320,10 +398,6 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.databaseError(w, err)
 				return
-			}
-			for i := range history {
-				history[i].Stdout = nil
-				history[i].Stderr = nil
 			}
 			writeJSON(w, 200, history)
 		case "GET":
@@ -382,6 +456,16 @@ func validName(name string) bool {
 }
 func validKey(key string) bool { b, err := hex.DecodeString(key); return err == nil && len(b) == 32 }
 func (s *Server) agent(w http.ResponseWriter, r *http.Request) {
+	id := r.Header.Get("X-Probex-ID")
+	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !protocol.ValidNodeID(id) || !validKey(key) {
+		problem(w, 401, "invalid node identity")
+		return
+	}
+	s.serveAgent(w, r, id, key)
+}
+
+func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, id, key string) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -391,49 +475,45 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) {
 	s.agents.Add(1)
 	s.mu.Unlock()
 	defer s.agents.Done()
-	id := r.Header.Get("X-Probex-ID")
-	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !protocol.ValidNodeID(id) || !validKey(key) {
-		problem(w, 401, "invalid node identity")
-		return
-	}
-	n, err := s.store.node(id)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			problem(w, 403, "node not registered")
-		} else {
-			s.databaseError(w, err)
-		}
-		return
-	}
-	allowed := n.Admission == "approved" && equal(n.KeyHash, hash(key))
-	if n.Admission == "invited" {
-		allowed, err = s.store.enrollmentValid(id, hash(r.Header.Get("X-Enrollment-Token")))
+	if id != protocol.LocalNodeID {
+		n, err := s.store.node(id)
 		if err != nil {
-			s.databaseError(w, err)
+			if errors.Is(err, sql.ErrNoRows) {
+				problem(w, 403, "node not registered")
+			} else {
+				s.databaseError(w, err)
+			}
 			return
 		}
-	}
-	if !allowed {
-		message := "invalid node credentials; use the original state file or request a new join key"
-		switch n.Admission {
-		case "invited":
-			message = "invalid join key; request the current key from the administrator"
-		case "expired":
-			message = "join key expired; request a new join key"
-		case "review":
-			message = "registration awaiting approval; wait for administrator approval"
-		case "rejected":
-			message = "registration rejected; use --rejoin or a new join key to request admission again"
-		case "deleted":
-			message = "node deleted; use --rejoin or a new join key to request admission again"
-		case "approved":
-			if r.Header.Get("X-Enrollment-Token") != "" {
-				message = "join key already used or invalid; reuse the original state file or request a new join key"
+		allowed := n.Admission == "approved" && equal(n.KeyHash, hash(key))
+		if n.Admission == "invited" {
+			allowed, err = s.store.enrollmentValid(id, hash(r.Header.Get("X-Enrollment-Token")))
+			if err != nil {
+				s.databaseError(w, err)
+				return
 			}
 		}
-		problem(w, 403, message)
-		return
+		if !allowed {
+			message := "invalid node credentials; use the original state file or request a new join key"
+			switch n.Admission {
+			case "invited":
+				message = "invalid join key; request the current key from the administrator"
+			case "expired":
+				message = "join key expired; request a new join key"
+			case "review":
+				message = "registration awaiting approval; wait for administrator approval"
+			case "rejected":
+				message = "registration rejected; use --rejoin or a new join key to request admission again"
+			case "deleted":
+				message = "node deleted; use --rejoin or a new join key to request admission again"
+			case "approved":
+				if r.Header.Get("X-Enrollment-Token") != "" {
+					message = "join key already used or invalid; reuse the original state file or request a new join key"
+				}
+			}
+			problem(w, 403, message)
+			return
+		}
 	}
 
 	conn, err := websocket.Accept(w, r, nil)
@@ -463,50 +543,62 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) {
 		conn.CloseNow()
 		return
 	}
-	n, err = s.store.node(id)
-	if err == nil && n.Admission == "invited" {
-		err = s.store.activateNode(id, hash(key), hash(r.Header.Get("X-Enrollment-Token")))
-	} else if err == nil && (n.Admission != "approved" || !equal(n.KeyHash, hash(key))) {
-		err = errIdentity
+	if id != protocol.LocalNodeID {
+		n, err := s.store.node(id)
+		if err == nil && n.Admission == "invited" {
+			err = s.store.activateNode(id, hash(key), hash(r.Header.Get("X-Enrollment-Token")))
+		} else if err == nil && (n.Admission != "approved" || !equal(n.KeyHash, hash(key))) {
+			err = errIdentity
+		}
+		if err != nil {
+			s.mu.Unlock()
+			log.Printf("register: %v", err)
+			conn.Close(websocket.StatusPolicyViolation, "registration rejected")
+			return
+		}
 	}
-
-	if err != nil {
+	// Keep registration and publication serialized so no business frame can
+	// overtake the first frame or acquire the peer before registration finishes.
+	if err := s.store.updateNode(id, func(n *protocol.Node) { n.Info = *hello.Info; n.LastSeen = time.Now().UTC() }); err != nil {
 		s.mu.Unlock()
-		log.Printf("register: %v", err)
-		conn.Close(websocket.StatusPolicyViolation, "registration rejected")
+		log.Printf("persist info: %v", err)
 		return
 	}
-	p := &peer{conn: conn}
+	if err := send(ctx, conn, protocol.Message{Type: "welcome", Version: protocol.WireVersion, ID: id}); err != nil {
+		s.mu.Unlock()
+		return
+	}
+	p := &peer{conn: conn, ctx: ctx, streams: map[string]*dataStream{}, terminals: map[string]*terminalPeer{}}
 	old := s.peers[id]
 	s.peers[id] = p
+	if id == protocol.LocalNodeID {
+		select {
+		case <-s.localReady:
+		default:
+			close(s.localReady)
+		}
+	}
 	s.mu.Unlock()
 	if old != nil {
 		old.conn.Close(websocket.StatusGoingAway, "connection replaced")
 	}
 	defer func() {
+		cancel()
 		s.mu.Lock()
 		if s.peers[id] == p {
 			delete(s.peers, id)
 		}
 		active := p.command
-		terminal := p.terminal
-		s.mu.Unlock()
-		if terminal != nil {
-			terminal.conn.CloseNow()
+		for _, t := range p.terminals {
+			t.cancel()
 		}
+		s.mu.Unlock()
 		if active != "" {
 			if err := s.unknown(active, "connection lost before result"); err != nil {
 				log.Printf("persist disconnect: %v", err)
 			}
 		}
 	}()
-	if err := send(ctx, conn, protocol.Message{Type: "welcome", Version: protocol.WireVersion, ID: id}); err != nil {
-		return
-	}
-	if err := s.store.updateNode(id, func(n *protocol.Node) { n.Info = *hello.Info; n.LastSeen = time.Now().UTC() }); err != nil {
-		log.Printf("persist info: %v", err)
-		return
-	}
 	for {
 		var m protocol.Message
 		deadline, done := context.WithTimeout(ctx, 65*time.Second)
@@ -517,6 +609,8 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) {
 		}
 		if m.Type == "info" && m.Info != nil {
 			err = s.store.updateNode(id, func(n *protocol.Node) { n.Info = *m.Info; n.LastSeen = time.Now().UTC() })
+		} else if m.Type == "stream_error" {
+			err = s.streamError(p, m)
 		} else {
 			err = s.commandMessage(p, m)
 		}
@@ -549,6 +643,9 @@ func (s *Server) unknown(id, reason string) error {
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
+	if s.localCancel != nil {
+		s.localCancel()
+	}
 	list := make([]*peer, 0, len(s.peers))
 	for _, p := range s.peers {
 		list = append(list, p)
@@ -557,5 +654,12 @@ func (s *Server) Close() {
 	for _, p := range list {
 		p.conn.CloseNow()
 	}
+	s.stopFileSessions("")
+	s.forwardOpsMu.Lock()
+	s.stopNodeForwards("")
+	s.forwardOpsMu.Unlock()
 	s.agents.Wait()
+	if s.localDone != nil {
+		<-s.localDone
+	}
 }

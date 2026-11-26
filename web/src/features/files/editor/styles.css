@@ -1,0 +1,331 @@
+.file-window {
+  position: fixed;
+  z-index: 55;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px #0003;
+  outline: none;
+  max-height: calc(100dvh - 16px);
+  max-width: calc(100vw - 16px);
+  min-width: min(340px, calc(100vw - 16px));
+  min-height: min(300px, calc(100dvh - 16px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  resize: both;
+}
+.file-window[hidden],
+.file-window-content[hidden] {
+  display: none;
+}
+.file-window.maximized {
+  resize: none;
+}
+.file-window-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.file-window-heading .dialog-title {
+  font-size: 14px;
+  white-space: nowrap;
+}
+.window-drag-area {
+  cursor: move;
+  touch-action: none;
+}
+.file-window-tabs {
+  flex: none;
+  height: 38px;
+  border-bottom: 1px solid var(--border);
+}
+.file-window-tabs .file-tab-title.dirty {
+  color: var(--error);
+}
+.file-window-tabs .workspace-tab {
+  height: 28px;
+}
+.file-window-content {
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+.file-window-footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 10px;
+  min-height: 30px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+.editor-status-left,
+.editor-status-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.editor-status-left {
+  flex: 1;
+}
+.editor-status-right {
+  flex-shrink: 0;
+  gap: 8px;
+  margin-right: 12px;
+}
+.editor-save-state,
+.editor-file-size {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.editor-save-state.dirty {
+  color: var(--error);
+}
+.editor-status-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-window-footer .icon-button {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+}
+.editor-status-button {
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.editor-status-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.editor-menus {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.editor-menu-trigger {
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.editor-menu-trigger:hover,
+.editor-menu-trigger[data-state='open'] {
+  background: var(--surface-hover);
+}
+.file-window-heading > .toolbar-actions {
+  margin-left: auto;
+}
+.editor-menu kbd,
+.editor-menu-value {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.editor-menu .menu-item {
+  min-height: 29px;
+  padding: 5px 8px;
+}
+.editor-menu .check-slot {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.text-editor,
+.media-preview,
+.pdf-preview {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.pdf-controls {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  width: max-content;
+  max-width: calc(100% - 16px);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 4px 18px #0002;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.pdf-controls .icon-button {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+}
+.editor-notices {
+  flex-shrink: 0;
+  max-height: 35%;
+  overflow: auto;
+}
+.editor-notice {
+  --notice-color: var(--muted);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 7px;
+  min-height: 26px;
+  padding: 3px 10px;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--notice-color) 25%, var(--border));
+  background: color-mix(in srgb, var(--notice-color) 9%, var(--surface));
+  color: var(--notice-color);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.editor-notice[data-tone='error'] {
+  --notice-color: var(--error);
+}
+.editor-notice[data-tone='warning'] {
+  --notice-color: #956300;
+}
+:root[data-theme='dark'] .editor-notice[data-tone='warning'] {
+  --notice-color: #e5bc68;
+}
+.editor-notice > svg {
+  flex-shrink: 0;
+}
+.editor-notice-message {
+  flex: 1;
+  min-width: 0;
+  max-height: 72px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.editor-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.editor-notice-actions .quiet-button {
+  min-height: 20px;
+  padding: 2px 5px;
+  font-size: inherit;
+}
+.editor-notice .editor-notice-close {
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  padding: 2px;
+  color: inherit;
+}
+.editor-host {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.media-preview-stage {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 12px;
+}
+.media-preview-stage img,
+.media-preview-stage video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.media-preview-stage audio {
+  width: min(480px, 100%);
+}
+.pdf-controls {
+  justify-content: center;
+}
+.pdf-canvas-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+.pdf-canvas-scroll canvas {
+  display: block;
+  margin: 12px auto;
+  background: white;
+  box-shadow: 0 2px 8px #0002;
+}
+.cm-editor .cm-search {
+  font-size: 11px;
+}
+.cm-editor .cm-search input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.cm-editor .cm-search button {
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+}
+
+@media (max-width: 600px) {
+  .file-window-footer {
+    gap: 6px;
+    padding-inline: 6px;
+  }
+  .editor-status-left {
+    gap: 6px;
+  }
+  .editor-status-right {
+    gap: 3px;
+  }
+  .editor-menu-trigger {
+    padding-inline: 5px;
+  }
+  .file-window-heading {
+    gap: 5px;
+    padding-inline: 8px;
+  }
+}
+
+.editor-empty-state {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+.editor-empty-state p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}

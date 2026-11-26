@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestInteractiveTerminal(t *testing.T) {
 	if parallel.Status != "succeeded" || string(parallel.Stdout) != "parallel-command" {
 		t.Fatalf("command during terminal failed: %+v", parallel)
 	}
-	write(protocol.Message{Type: "input", Data: []byte("printf '\\137START\\137\\n'; sleep 30\n")})
+	write(protocol.Message{Type: "input", Data: []byte("/bin/sh -c 'printf \"\\137START\\137\\n\"; exec sleep 30'\n")})
 	wait("_START_")
 	write(protocol.Message{Type: "input", Data: []byte{3}})
 	write(protocol.Message{Type: "input", Data: []byte("printf '\\137AFTER\\137\\n'\n")})
@@ -319,6 +320,227 @@ func TestActiveTerminalStopsOnRevocationAndAgentDisconnect(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 			t.Fatalf("terminal shell %d survived %s", pid, mode)
+		})
+	}
+}
+
+func TestEightIndependentTerminalsWithoutDirectoryTelemetry(t *testing.T) {
+	f := newFixture(t, false)
+	f.startAgent()
+	node := f.node()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	endpoint := strings.Replace(f.http.URL, "http://", "ws://", 1) + "/api/nodes/" + node.ID + "/terminal"
+	// Separate logins still share the node's eight-shell budget.
+	var connections []*websocket.Conn
+	for i := 0; i < protocol.MaxTerminals; i++ {
+		login, err := http.Post(f.http.URL+"/api/login", "application/json", strings.NewReader(`{"token":"`+f.admin+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		login.Body.Close()
+		cookie := login.Cookies()[0]
+		conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseNow()
+		connections = append(connections, conn)
+	}
+	extra, response, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + f.admin}}})
+	if err == nil {
+		extra.CloseNow()
+		t.Fatal("ninth shell accepted")
+	}
+	if response == nil || response.StatusCode != 409 {
+		t.Fatal("wrong limit response", err)
+	}
+	for i, conn := range connections {
+		directory := filepath.Join(t.TempDir(), "中文 space "+strconv.Itoa(i))
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := wsjson.Write(ctx, conn, protocol.Message{Type: "resize", Cols: 90 + i, Rows: 30 + i}); err != nil {
+			t.Fatal(err)
+		}
+		command := "cd '" + directory + "'; export PROBEX_SESSION=" + strconv.Itoa(i) + "; stty size; printf '\\137PWD\\137%s\\n' \"$PWD\"; printf '\\033]9;9;/pass-through\\007'; printf '\\137SESSION\\137%s\\n' \"$PROBEX_SESSION\"\n"
+		if err := wsjson.Write(ctx, conn, protocol.Message{Type: "input", Data: []byte(command)}); err != nil {
+			t.Fatal(err)
+		}
+		output := ""
+		for !strings.Contains(output, "\x1b]9;9;/pass-through\x07") || !strings.Contains(output, "_PWD_"+directory) || !strings.Contains(output, strconv.Itoa(30+i)+" "+strconv.Itoa(90+i)) || !strings.Contains(output, "_SESSION_"+strconv.Itoa(i)) {
+			var m protocol.Message
+			if err := wsjson.Read(ctx, conn, &m); err != nil {
+				t.Fatalf("shell %d output=%q: %v", i, output, err)
+			}
+			if m.Type == "term_cwd" {
+				t.Fatal("terminal emitted unsolicited directory telemetry", m)
+			}
+			output += string(m.Data)
+		}
+	}
+	parallel := f.wait(f.command(node.ID, "printf parallel-eight-shells", 5))
+	if parallel.Status != "succeeded" || string(parallel.Stdout) != "parallel-eight-shells" {
+		t.Fatal(parallel)
+	}
+	if err := wsjson.Write(ctx, connections[0], protocol.Message{Type: "close"}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var m protocol.Message
+		if err := wsjson.Read(ctx, connections[0], &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Type == "term_exit" {
+			break
+		}
+	}
+	fresh, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + f.admin}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.CloseNow()
+	if err := wsjson.Write(ctx, fresh, protocol.Message{Type: "input", Data: []byte("printf '\\137FRESH\\137%s\\n' \"${PROBEX_SESSION-unset}\"\n")}); err != nil {
+		t.Fatal(err)
+	}
+	output := ""
+	for !strings.Contains(output, "_FRESH_unset") {
+		var m protocol.Message
+		if err := wsjson.Read(ctx, fresh, &m); err != nil {
+			t.Fatal(err)
+		}
+		output += string(m.Data)
+	}
+	for i, conn := range connections[1:] {
+		if err := wsjson.Write(ctx, conn, protocol.Message{Type: "input", Data: []byte("printf '\\137KEPT\\137%s\\n' \"$PROBEX_SESSION\"\n")}); err != nil {
+			t.Fatal(err)
+		}
+		output := ""
+		for !strings.Contains(output, "_KEPT_"+strconv.Itoa(i+1)) {
+			var m protocol.Message
+			if err := wsjson.Read(ctx, conn, &m); err != nil {
+				t.Fatal(err)
+			}
+			output += string(m.Data)
+		}
+	}
+	var history []protocol.Command
+	f.request("GET", "/api/nodes/"+node.ID+"/commands", nil, 200, &history)
+	if len(history) != 1 || history[0].ID != parallel.ID {
+		t.Fatal("terminal history persisted", history)
+	}
+}
+
+func TestTerminalDrainsLargeOutputBeforeExit(t *testing.T) {
+	f := newFixture(t, false)
+	f.startAgent()
+	node := f.node()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, strings.Replace(f.http.URL, "http://", "ws://", 1)+"/api/nodes/"+node.ID+"/terminal", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + f.admin}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	if err := wsjson.Write(ctx, conn, protocol.Message{Type: "input", Data: []byte("stty -echo; head -c 2097152 /dev/zero | tr '\\000' X; printf '\\137TAIL\\137'; exit\n")}); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	for {
+		var m protocol.Message
+		if err := wsjson.Read(ctx, conn, &m); err != nil {
+			t.Fatal(err)
+		}
+		output.Write(m.Data)
+		if m.Type == "term_exit" {
+			break
+		}
+	}
+	want := append(bytes.Repeat([]byte{'X'}, 2097152), "_TAIL_"...)
+	if !bytes.Contains(output.Bytes(), want) {
+		t.Fatalf("truncated terminal output length=%d suffix=%q", output.Len(), output.Bytes()[max(0, output.Len()-100):])
+	}
+}
+
+func TestTerminalReclaimsForegroundAndBackgroundJobs(t *testing.T) {
+	for _, action := range []string{"close", "revoke", "disconnect"} {
+		t.Run(action, func(t *testing.T) {
+			f := newFixture(t, false)
+			f.startAgent()
+			node := f.node()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, strings.Replace(f.http.URL, "http://", "ws://", 1)+"/api/nodes/"+node.ID+"/terminal", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + f.admin}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.CloseNow()
+			dir := t.TempDir()
+			bg, fg := filepath.Join(dir, "background.pid"), filepath.Join(dir, "foreground.pid")
+			command := "sleep 60 & echo $! > '" + bg + "'; /bin/sh -c 'echo $$ > \"" + fg + "\"; exec sleep 60'\n"
+			if err := wsjson.Write(ctx, conn, protocol.Message{Type: "input", Data: []byte(command)}); err != nil {
+				t.Fatal(err)
+			}
+			var pids []int
+			for _, file := range []string{bg, fg} {
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					data, err := os.ReadFile(file)
+					if err == nil {
+						pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+						if err != nil {
+							t.Fatal(err)
+						}
+						pids = append(pids, pid)
+						break
+					}
+					if !os.IsNotExist(err) || time.Now().After(deadline) {
+						t.Fatal("job did not start", err)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			switch action {
+			case "close":
+				if err := wsjson.Write(ctx, conn, protocol.Message{Type: "close"}); err != nil {
+					t.Fatal(err)
+				}
+			case "revoke":
+				f.request("DELETE", "/api/nodes/"+node.ID, nil, 200, nil)
+				select {
+				case err := <-f.done:
+					if err == nil {
+						t.Fatal("revocation must stop the Agent")
+					}
+					f.cancel()
+					f.cancel = nil
+				case <-ctx.Done():
+					t.Fatal("revoked Agent retained jobs")
+				}
+			case "disconnect":
+				f.stopAgent()
+			}
+			for {
+				var m protocol.Message
+				err := wsjson.Read(ctx, conn, &m)
+				if m.Type == "term_exit" || err != nil {
+					break
+				}
+			}
+			for _, pid := range pids {
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+					// Container PID 1 may retain a reparented zombie; it owns no running job.
+					if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) || err == nil && strings.Fields(string(data))[2] == "Z" {
+						break
+					}
+					if err != nil || time.Now().After(deadline) {
+						t.Fatalf("%s retained job %d: %v %q", action, pid, err, data)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
 		})
 	}
 }

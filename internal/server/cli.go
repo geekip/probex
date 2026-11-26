@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"probex/internal/protocol"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,11 +49,13 @@ func listen(args []string) error {
 	flags := flag.NewFlagSet("listen", flag.ContinueOnError)
 	flags.StringVar(&address, "listen", address, "listen address")
 	admin := flags.String("admin-token", os.Getenv("PROBEX_ADMIN_TOKEN"), "management token")
+	adminFile := flags.String("admin-token-file", "", "management token file")
 	db := flags.String("db", filepath.Join(directory, "probex.db"), "database file")
 	cert := flags.String("tls-cert", "", "TLS certificate file")
 	key := flags.String("tls-key", "", "TLS key file")
 	registration := flags.Bool("allow-registration", true, "allow clients to submit registration requests")
 	autoApprove := flags.Bool("auto-approve", true, "automatically approve new registration requests")
+	enableAgent := flags.Bool("enable-agent", true, "enable the built-in local node")
 	joinTTL := flags.Duration("join-ttl", 24*time.Hour, "join key validity period")
 	if err := flags.Parse(booleanArgs(args)); err != nil {
 		return err
@@ -66,7 +69,12 @@ func listen(args []string) error {
 	if (*cert == "") != (*key == "") {
 		return fmt.Errorf("both --tls-cert and --tls-key required")
 	}
-	if *admin == "" {
+	if *adminFile != "" {
+		*admin, err = savedAdminToken(*adminFile, false)
+		if err != nil {
+			return err
+		}
+	} else if *admin == "" {
 		path := filepath.Join(directory, "probexd.token")
 		*admin, err = savedAdminToken(path, true)
 		if err != nil {
@@ -103,16 +111,16 @@ func listen(args []string) error {
 			return fmt.Errorf("TLS file contains no certificates")
 		}
 	}
-	app, err := New(store, Config{AdminToken: *admin, AllowRegistration: *registration, AutoApprove: *autoApprove, CA: string(publicCertificates), EnrollmentTTL: *joinTTL})
-	if err != nil {
-		return err
-	}
-	defer app.Close()
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
+	app, err := New(store, Config{AdminToken: *admin, AllowRegistration: *registration, AutoApprove: *autoApprove, CA: string(publicCertificates), EnrollmentTTL: *joinTTL, LocalNode: *enableAgent})
+	if err != nil {
+		return err
+	}
+	defer app.Close()
 	_, port, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
 		return err
@@ -145,21 +153,81 @@ func listen(args []string) error {
 	return err
 }
 func manage(action string, args []string) error {
-	if action != "list" && action != "add" && action != "approve" && action != "reject" && action != "remove" && action != "exec" {
+	if action != "cp" && action != "forward" && action != "list" && action != "add" && action != "approve" && action != "reject" && action != "remove" && action != "exec" {
 		return fmt.Errorf("unknown command %q", action)
+	}
+	forwardMode := "create"
+	if action == "forward" && len(args) > 0 && (args[0] == "list" || args[0] == "remove") {
+		forwardMode, args = args[0], args[1:]
 	}
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
 	serverURL := f.String("server", "http://127.0.0.1:17892", "management server URL")
 	token := f.String("admin-token", os.Getenv("PROBEX_ADMIN_TOKEN"), "management token")
-	name := f.String("client", "", "node name or ID")
-	newName := f.String("name", "", "new node name")
-	command := f.String("command", "", "shell command")
-	timeout := f.Int("timeout", 60, "remote command timeout in seconds")
+	tokenFile := f.String("admin-token-file", "", "management token file")
+	var name, newName, command string
+	var timeout int
+	if action != "cp" {
+		f.StringVar(&name, "client", "", "node name or ID")
+		f.StringVar(&newName, "name", "", "new node name")
+		f.StringVar(&command, "command", "", "shell command")
+		f.IntVar(&timeout, "timeout", 60, "remote command timeout in seconds")
+	}
 	ca := f.String("ca", "", "custom CA file")
+	recursive, force := false, false
+	if action == "cp" {
+		f.Usage = func() {
+			fmt.Fprintln(f.Output(), "Usage: probexd cp [-r] [-f] [--server URL] SOURCE... DESTINATION")
+			fmt.Fprintln(f.Output(), "Use NAME:PATH or ID:PATH for a node; unprefixed paths belong to the CLI host.")
+			fmt.Fprintln(f.Output(), "Prefix local names containing ':' with './'. Local Windows drive letters take precedence over node names.")
+			f.PrintDefaults()
+		}
+		f.BoolVar(&recursive, "r", false, "copy directories recursively, preserving empty directories")
+		f.BoolVar(&force, "f", false, "overwrite existing files without prompting")
+	}
+	network := "tcp"
+	if action == "forward" {
+		f.StringVar(&network, "protocol", "tcp", "forwarding protocol: tcp or udp")
+	}
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 0 {
+	var paths []copyPath
+	var pairs []forwardPair
+	if action == "forward" {
+		rest := f.Args()
+		if forwardMode == "create" && len(rest) > 0 && (rest[0] == "list" || rest[0] == "remove") {
+			forwardMode = rest[0]
+			rest = rest[1:]
+		}
+		args = rest
+		switch forwardMode {
+		case "list":
+			if len(args) != 0 {
+				return fmt.Errorf("forward list takes no positional arguments")
+			}
+		case "remove":
+			if len(args) == 0 {
+				return fmt.Errorf("forward remove requires one or more IDs")
+			}
+			for _, id := range args {
+				if !protocol.ValidNodeID(id) {
+					return fmt.Errorf("invalid forward ID %q", id)
+				}
+			}
+		default:
+			var err error
+			pairs, err = parseForwardPairs(args, network)
+			if err != nil {
+				return err
+			}
+		}
+	} else if action == "cp" {
+		var err error
+		paths, err = parseCopyPaths(f.Args(), runtime.GOOS == "windows")
+		if err != nil {
+			return err
+		}
+	} else if f.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments")
 	}
 	base, err := protocol.Endpoint(*serverURL, false)
@@ -167,7 +235,12 @@ func manage(action string, args []string) error {
 		return err
 	}
 	local := localManagement(base)
-	if *token == "" && local {
+	if *tokenFile != "" {
+		*token, err = savedAdminToken(*tokenFile, false)
+		if err != nil {
+			return err
+		}
+	} else if *token == "" && local {
 		directory, e := programDirectory()
 		if e != nil {
 			return e
@@ -178,7 +251,7 @@ func manage(action string, args []string) error {
 		}
 	}
 	if *token == "" {
-		return fmt.Errorf("management token required: use --admin-token or PROBEX_ADMIN_TOKEN")
+		return fmt.Errorf("management token required: use --admin-token-file, --admin-token or PROBEX_ADMIN_TOKEN")
 	}
 	client, err := managementClient(base, *ca)
 	if err != nil {
@@ -196,6 +269,9 @@ func manage(action string, args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+	if action == "cp" {
+		return copyCommand(client, base, *token, paths, recursive, force)
 	}
 	request := func(method, path string, body any, result any) error {
 		var data []byte
@@ -226,11 +302,14 @@ func manage(action string, args []string) error {
 		}
 		return json.NewDecoder(resp.Body).Decode(result)
 	}
+	if action == "forward" {
+		return forwardCommand(forwardMode, args, pairs, name, request)
+	}
 	if action == "add" {
 		var result struct {
 			Key string `json:"key"`
 		}
-		if err := request("POST", "/api/nodes", map[string]string{"name": *newName}, &result); err != nil {
+		if err := request("POST", "/api/nodes", map[string]string{"name": newName}, &result); err != nil {
 			return err
 		}
 		fmt.Println(result.Key)
@@ -251,27 +330,11 @@ func manage(action string, args []string) error {
 		}
 		return nil
 	}
-	var node *protocol.Node
-	for i := range nodes {
-		if nodes[i].ID == *name {
-			node = &nodes[i]
-			break
-		}
+	selected, err := resolveNode(nodes, name)
+	if err != nil {
+		return err
 	}
-	if node == nil {
-		for i := range nodes {
-			if nodes[i].Name == *name {
-				if node != nil {
-					return fmt.Errorf("multiple nodes named %q; use the node ID", *name)
-				}
-				node = &nodes[i]
-			}
-		}
-	}
-
-	if node == nil {
-		return fmt.Errorf("node %q not found", *name)
-	}
+	node := &selected
 	if action == "approve" || action == "reject" {
 		var updated protocol.Node
 		if err := request("POST", "/api/nodes/"+node.ID+"/"+action, map[string]string{}, &updated); err != nil {
@@ -289,7 +352,7 @@ func manage(action string, args []string) error {
 		return nil
 	}
 	var c protocol.Command
-	if err := request("POST", "/api/nodes/"+node.ID+"/commands", map[string]any{"command": *command, "timeout_seconds": *timeout}, &c); err != nil {
+	if err := request("POST", "/api/nodes/"+node.ID+"/commands", map[string]any{"command": command, "timeout_seconds": timeout}, &c); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "command", c.ID)

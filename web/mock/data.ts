@@ -1,4 +1,4 @@
-import type { Command, DeviceInfo, Node } from '../src/api';
+import type { Command, DeviceInfo, Node } from '@/features/nodes/types';
 
 const MiB = 1024 ** 2,
   GiB = 1024 ** 3;

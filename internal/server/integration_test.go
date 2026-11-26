@@ -127,6 +127,21 @@ func (f *fixture) node() protocol.Node {
 	f.t.Fatal("node did not connect")
 	return protocol.Node{}
 }
+func (f *fixture) waitOffline(id string) {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var node protocol.Node
+		f.request("GET", "/api/nodes/"+id, nil, 200, &node)
+		if !node.Online {
+			return
+		}
+		if time.Now().After(deadline) {
+			f.t.Fatal("server still reports the previous connection online")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 func (f *fixture) command(id, text string, timeout int) protocol.Command {
 	f.t.Helper()
 	var c protocol.Command
@@ -173,6 +188,7 @@ func TestAgentLifecycleAndCommands(t *testing.T) {
 		t.Fatalf("bad truncation: status=%s, size=%d, flag=%v", c.Status, len(c.Stdout), c.Truncated)
 	}
 	f.stopAgent()
+	f.waitOffline(n.ID)
 	f.startAgent()
 	again := f.node()
 	if again.ID != n.ID {
@@ -304,7 +320,11 @@ func TestManagementCLI(t *testing.T) {
 	f := newFixture(t, false)
 	f.startAgent()
 	f.node()
-	options := []string{"--server", f.http.URL, "--admin-token", f.admin}
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(f.admin+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := []string{"--server", f.http.URL, "--admin-token-file", tokenFile}
 	run := func(action string, extra ...string) (string, error) {
 		t.Helper()
 		reader, writer, err := os.Pipe()

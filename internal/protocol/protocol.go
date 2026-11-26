@@ -10,11 +10,12 @@ import (
 	"time"
 )
 
-const Version = "0.1.0"
-const WireVersion = 4
+const Version = "0.2.0"
+const WireVersion = 5
 const MaxMessage = 64 << 10
 const MaxOutput = 256 << 10
 const ChunkSize = 8 << 10
+const MaxTerminals = 8
 
 type Info struct {
 	Hostname        string            `json:"hostname"`
@@ -37,6 +38,10 @@ type Info struct {
 }
 
 type Message struct {
+	CWD            string `json:"cwd,omitempty"`
+	Purpose        string `json:"purpose,omitempty"`
+	Ticket         string `json:"ticket,omitempty"`
+	Target         string `json:"target,omitempty"`
 	Cols           int    `json:"cols,omitempty"`
 	Rows           int    `json:"rows,omitempty"`
 	Type           string `json:"type"`
@@ -153,6 +158,8 @@ func Endpoint(raw string, websocket bool) (string, error) {
 func Terminal(status string) bool {
 	return status == "succeeded" || status == "failed" || status == "timed_out" || status == "unknown"
 }
+
+const LocalNodeID = "0"
 
 func ValidNodeID(id string) bool {
 	value, err := strconv.ParseInt(id, 10, 64)

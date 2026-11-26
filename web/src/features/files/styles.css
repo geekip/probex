@@ -1,0 +1,206 @@
+.file-table {
+  width: 100%;
+  font-size: 11px;
+}
+.file-context-menu {
+  padding: 4px;
+}
+.file-context-menu .menu-item {
+  min-height: 26px;
+  padding: 4px 8px;
+  gap: 7px;
+}
+.file-context-menu .menu-separator {
+  margin: 3px 0;
+}
+.file-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+.file-table th,
+.file-table td {
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+.file-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-table td:first-child {
+  padding: 0 6px;
+}
+.file-table tr.selected {
+  background: var(--accent-soft);
+}
+.file-browser {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  font-size: 12px;
+}
+.files-context {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.file-list-scroll {
+  overflow: auto;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+  background: var(--surface);
+  user-select: none;
+}
+.selecto-selection.file-selection-box {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  z-index: 60;
+}
+.file-drag-preview {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 4px 12px #0002;
+  font-size: 12px;
+}
+.file-navigation {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.file-navigation .icon-button {
+  width: 23px;
+  min-width: 23px;
+  height: 26px;
+}
+.file-navigation form {
+  flex: 1;
+  min-width: 0;
+}
+.file-navigation input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 5px;
+}
+.file-error {
+  margin: 0;
+  padding: 7px 10px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.file-error {
+  color: var(--error);
+  max-height: 100px;
+  overflow-y: auto;
+}
+.file-entry {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  padding: 7px 3px;
+  font-size: 12px;
+}
+.file-entry span,
+.file-sort span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-entry svg {
+  flex-shrink: 0;
+  color: var(--muted);
+  width: 15px;
+  height: 15px;
+}
+
+.file-counts {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.file-empty,
+.files-sentinel {
+  padding: 16px 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.files-sentinel {
+  min-height: 1px;
+  padding: 4px;
+}
+@media (max-width: 900px) {
+  .file-browser {
+    flex: none;
+    height: 450px;
+  }
+}
+
+.file-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.file-counts span {
+  margin-left: auto;
+}
+.file-sort {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  font-size: 11px;
+  font-weight: inherit;
+}
+.file-sort svg {
+  flex-shrink: 0;
+}
+.file-table tr.cut {
+  opacity: 0.5;
+}
+.file-table tr.drop-target {
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.file-service-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--error);
+}
+.file-service-error strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.file-service-error small {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}

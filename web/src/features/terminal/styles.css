@@ -1,0 +1,180 @@
+.terminal-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+}
+.terminal-toolbar {
+  height: 38px;
+  min-height: 38px;
+  flex-shrink: 0;
+}
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 5px 8px;
+  background: var(--terminal);
+  border-bottom: 1px solid var(--border);
+}
+.toolbar-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.connection-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.terminal-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 10px 5px 10px 10px;
+  overflow: hidden;
+}
+.terminal-container {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.terminal-body .xterm {
+  height: 100%;
+}
+.terminal-body .xterm .xterm-viewport {
+  background-color: var(--terminal);
+  scrollbar-width: thin;
+}
+
+.xterm .xterm-scrollable-element > .scrollbar {
+  width: 10px !important;
+}
+
+.xterm .xterm-scrollable-element > .scrollbar > .slider {
+  width: 100% !important;
+  border-radius: 5px !important;
+}
+
+@media (max-width: 768px) {
+  .terminal-toolbar {
+    padding-inline: 10px;
+  }
+}
+@media (max-width: 768px) {
+  .terminal-body {
+    padding-left: 10px;
+    padding-right: 4px;
+  }
+}
+.terminal-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  width: min(350px, calc(100vw - 16px));
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 8px 24px #0002;
+  outline: none;
+  z-index: 35;
+}
+.terminal-search input {
+  flex: 1;
+  min-width: 32px;
+  width: 120px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+}
+.terminal-search .icon-button {
+  width: 28px;
+  height: 28px;
+}
+@media (max-width: 480px) {
+  .toolbar-actions {
+    gap: 4px;
+  }
+}
+@media (max-width: 480px) {
+  .toolbar-actions .icon-button {
+    width: 28px;
+  }
+}
+
+.terminal-layout {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--terminal);
+}
+.split-pane {
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  container-type: inline-size;
+  background: var(--terminal);
+}
+.split-pane .terminal-pane {
+  min-height: 0;
+}
+.split-pane .terminal-toolbar {
+  gap: 6px;
+  padding-left: 10px;
+  padding-right: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.split-pane .toolbar-actions {
+  gap: 4px;
+}
+.pane-group,
+.layout-slot {
+  width: 100%;
+  height: 100%;
+}
+.layout-cell {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane-divider {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 6px;
+  background: var(--border);
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+}
+.pane-divider.horizontal {
+  cursor: col-resize;
+}
+.pane-divider:hover,
+.pane-divider:focus-visible,
+.pane-divider[data-active] {
+  background: var(--accent);
+}
+.terminal-layout.resizing .split-pane {
+  pointer-events: none;
+  user-select: none;
+}
+@container (max-width: 360px) {
+  .connection-label {
+    display: none;
+  }
+}
+
+.terminal-toolbar .icon-button {
+  width: 28px;
+  height: 28px;
+}

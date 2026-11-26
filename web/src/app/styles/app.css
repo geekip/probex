@@ -1,0 +1,10 @@
+@import 'tailwindcss';
+@import './base.css';
+@import '../../shared/tabs.css';
+@import './workspace.css';
+@import '../../features/nodes/styles.css';
+@import '../../features/terminal/styles.css';
+@import '../../features/files/styles.css';
+@import '../../features/files/editor/styles.css';
+@import '../../features/transfers/styles.css';
+@import '../../features/forwards/styles.css';

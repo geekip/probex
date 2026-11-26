@@ -1,11 +1,16 @@
 import { posix, win32 } from 'node:path';
 import type WebSocket from 'ws';
-import type { Node } from '../src/api';
+import type { Node } from '@/features/nodes/types';
 import { encode } from './data';
 
-export function terminal(socket: WebSocket, node: Node, release: () => void) {
+export function terminal(
+  socket: WebSocket,
+  node: Node,
+  release: () => void,
+  initialCWD = '',
+) {
   const windows = node.info.os === 'windows';
-  let cwd = windows ? 'C:\\Users\\Administrator' : '/root';
+  let cwd = initialCWD || (windows ? 'C:\\Users\\Administrator' : '/root');
   let line = '',
     finished = false,
     program = '';
@@ -15,10 +20,11 @@ export function terminal(socket: WebSocket, node: Node, release: () => void) {
     historyIndex = 0;
   const history: string[] = [],
     environment: Record<string, string> = {};
-  const prompt = () =>
-    windows
+  const prompt = () => {
+    return windows
       ? `PS ${cwd}> `
       : `\x1b[32mroot@${node.name}\x1b[0m:\x1b[34m${cwd}\x1b[0m# `;
+  };
   function write(text: string) {
     if (socket.readyState === 1)
       socket.send(JSON.stringify({ type: 'term_output', data: encode(text) }));

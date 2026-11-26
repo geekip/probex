@@ -30,7 +30,10 @@ func HTTPClientWithCA(pem []byte) (*http.Client, error) {
 		}
 		t.TLSClientConfig.RootCAs = pool
 	}
-	return &http.Client{Transport: t}, nil
+	return &http.Client{
+		Transport:     t,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}, nil
 }
 
 type ExitError struct{ Code int }

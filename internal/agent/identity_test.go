@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestServerAssignedIdentityAndInvitationReplacement(t *testing.T) {
@@ -33,9 +34,16 @@ func TestServerAssignedIdentityAndInvitationReplacement(t *testing.T) {
 	if err != nil || joined.Key == request.Key || joined.Mode != "key" || joined.ID != "1" {
 		t.Fatal("invitation did not replace request", err)
 	}
+	stamp := time.Unix(1000000000, 0)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
 	saved, err := loadIdentity(path, "1", "node", "", "invitation-a", false)
 	if err != nil || saved.Key != joined.Key {
 		t.Fatal("same invitation changed saved credentials", err)
+	}
+	if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(stamp) {
+		t.Fatalf("unchanged identity was rewritten: %v (%v)", info, err)
 	}
 	replacement, err := loadIdentity(path, "1", "node", "", "invitation-b", false)
 	if err != nil || replacement.Key == saved.Key || replacement.Enrolled {

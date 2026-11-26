@@ -21,6 +21,7 @@ func TestRenamePreservesIdentityAndEnrollment(t *testing.T) {
 		t.Fatal("rename changed identity or connection", renamed)
 	}
 	f.stopAgent()
+	f.waitOffline(original.ID)
 	f.startAgent() // Saved client still sends its original name.
 	if got := f.node(); got.ID != original.ID || got.Name != renamed.Name {
 		t.Fatal("saved identity could not reconnect with its original name", got)

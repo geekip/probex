@@ -1,0 +1,111 @@
+.transfer-popover {
+  z-index: 60;
+  width: min(760px, calc(100vw - 16px));
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: 0 12px 40px #0002;
+  outline: none;
+}
+.transfer-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.transfer-heading h2 {
+  font-size: 13px;
+  margin: 0;
+}
+.transfer-bulk-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.transfer-bulk-actions .quiet-button {
+  min-height: 26px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.transfer-table-scroll {
+  max-height: 360px;
+  overflow: auto;
+}
+.transfer-table {
+  min-width: 550px;
+  width: 100%;
+  font-size: 11px;
+}
+.transfer-table th,
+.transfer-table td {
+  padding: 8px;
+  vertical-align: top;
+}
+.transfer-table th:first-child {
+  width: 30%;
+}
+.transfer-name {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transfer-error {
+  display: block;
+  max-width: 240px;
+  white-space: normal;
+  color: var(--error);
+}
+.transfer-actions,
+.upload-choices {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.transfer-size span {
+  white-space: nowrap;
+  display: block;
+}
+.transfer-size progress {
+  width: 100%;
+  height: 4px;
+  display: block;
+  margin-top: 6px;
+  accent-color: var(--accent);
+}
+.upload-dialog {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, calc(100vw - 24px));
+  max-height: 85vh;
+  overflow: auto;
+  z-index: 55;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px #0003;
+  outline: none;
+}
+.upload-content {
+  padding: 16px;
+}
+.upload-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  color: var(--muted);
+}
+.upload-dropzone p {
+  margin: 0;
+}

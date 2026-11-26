@@ -47,25 +47,46 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if (exists != 0 && version != 2) || (version != 0 && version != 2) {
+	if exists != 0 && version == 0 || version != 0 && (version < 2 || version > 5) {
 		db.Close()
 		return nil, fmt.Errorf("unsupported database schema: use a new --db file; existing database was not changed")
 	}
+	migration := ""
+	if version == 3 {
+		migration = `ALTER TABLE forwards ADD COLUMN name TEXT NOT NULL DEFAULT ''; UPDATE forwards SET name=listen_addr;`
+	}
+	if version < 5 {
+		migration += `DROP INDEX IF EXISTS nodes_active_name;`
+	}
 	_, err = db.Exec(`PRAGMA foreign_keys=ON;
+BEGIN;
 CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, admission TEXT NOT NULL, key_hash TEXT NOT NULL, body TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS nodes_key ON nodes(key_hash);
-CREATE UNIQUE INDEX IF NOT EXISTS nodes_active_name ON nodes(name) WHERE admission IN ('invited','review','approved');
 CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, node_id INTEGER NOT NULL REFERENCES nodes(id), status TEXT NOT NULL, created_at TEXT NOT NULL, body TEXT NOT NULL);
 	CREATE INDEX IF NOT EXISTS command_history ON commands(node_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS command_summaries(id TEXT PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE, body TEXT NOT NULL);
+CREATE TRIGGER IF NOT EXISTS command_summary_insert AFTER INSERT ON commands BEGIN
+	INSERT INTO command_summaries(id,body) VALUES(NEW.id,json_set(NEW.body,'$.stdout',NULL,'$.stderr',NULL));
+END;
+CREATE TRIGGER IF NOT EXISTS command_summary_update AFTER UPDATE OF body ON commands BEGIN
+	UPDATE command_summaries SET body=json_set(NEW.body,'$.stdout',NULL,'$.stderr',NULL) WHERE id=NEW.id;
+END;
+INSERT INTO command_summaries(id,body)
+	SELECT c.id,json_set(c.body,'$.stdout',NULL,'$.stderr',NULL) FROM commands c
+	WHERE NOT EXISTS (SELECT 1 FROM command_summaries WHERE id=c.id);
 	CREATE TABLE IF NOT EXISTS enrollments(node_id INTEGER PRIMARY KEY REFERENCES nodes(id), token_hash TEXT NOT NULL, expires_at TEXT NOT NULL);
-PRAGMA user_version=2;`)
+CREATE TABLE IF NOT EXISTS forwards(id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, name TEXT NOT NULL DEFAULT '', protocol TEXT NOT NULL, listen_addr TEXT NOT NULL, target_host TEXT NOT NULL, target_port INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(protocol,listen_addr));
+` + migration + `
+CREATE UNIQUE INDEX IF NOT EXISTS nodes_active_name ON nodes(name) WHERE id != 0 AND admission IN ('invited','review','approved');
+PRAGMA user_version=5;
+COMMIT;`)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
 	s := &Store{db: db}
 	_, err = db.Exec(`BEGIN;
-DELETE FROM commands WHERE (json_extract(body,'$.command')='[interactive shell]' AND json_extract(body,'$.timeout_seconds')=0) OR node_id IN (SELECT id FROM nodes WHERE admission='deleted');
+DELETE FROM commands WHERE id IN (SELECT id FROM command_summaries WHERE json_extract(body,'$.command')='[interactive shell]' AND json_extract(body,'$.timeout_seconds')=0) OR node_id IN (SELECT id FROM nodes WHERE admission='deleted');
 DELETE FROM enrollments WHERE node_id IN (SELECT id FROM nodes WHERE admission='deleted');
 DELETE FROM nodes WHERE admission='deleted';
 COMMIT;`)
@@ -123,6 +144,9 @@ func (s *Store) deleteNode(id string) error {
 	defer tx.Rollback()
 	if err := tx.QueryRow(`SELECT id FROM nodes WHERE id=?`, id).Scan(&id); err != nil {
 		return err
+	}
+	if id == protocol.LocalNodeID {
+		return errAdmission
 	}
 	for _, query := range []string{
 		`DELETE FROM commands WHERE node_id=?`,
@@ -236,7 +260,7 @@ func (s *Store) node(id string) (nodeRow, error) {
 	return n, tx.Commit()
 }
 
-func (s *Store) nodes() ([]protocol.Node, error) {
+func (s *Store) nodes(includeLocal bool) ([]protocol.Node, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -247,7 +271,7 @@ func (s *Store) nodes() ([]protocol.Node, error) {
 	if err = expireKeys(tx); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(`SELECT body FROM nodes WHERE admission!='deleted' ORDER BY name, id`)
+	rows, err := tx.Query(`SELECT body FROM nodes WHERE admission!='deleted' AND (id != 0 OR ?) ORDER BY id != 0, name, id`, includeLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +382,8 @@ func (s *Store) updateCommand(id string, update func(*protocol.Command)) error {
 	return s.saveCommand(c)
 }
 func (s *Store) history(id string, offset int) ([]protocol.Command, error) {
-	rows, err := s.db.Query(`SELECT body FROM commands WHERE node_id=? ORDER BY created_at DESC LIMIT 20 OFFSET ?`, id, offset)
+	rows, err := s.db.Query(`SELECT s.body FROM commands c JOIN command_summaries s ON s.id=c.id
+		WHERE c.node_id=? ORDER BY c.created_at DESC LIMIT 20 OFFSET ?`, id, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -376,4 +401,9 @@ func (s *Store) history(id string, offset int) ([]protocol.Command, error) {
 		result = append(result, c)
 	}
 	return result, rows.Err()
+}
+
+func isUniqueConstraint(err error) bool {
+	var constraint *sqlite.Error
+	return errors.As(err, &constraint) && constraint.Code() == 2067
 }

@@ -203,7 +203,7 @@ func TestAutoincrementPersistsAndRequestsAreIdempotent(t *testing.T) {
 	if err != nil || n.ID != "1" {
 		t.Fatal(n, err)
 	}
-	nodes, err := s.nodes()
+	nodes, err := s.nodes(true)
 	if err != nil {
 		t.Fatal(err)
 	}

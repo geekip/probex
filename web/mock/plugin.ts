@@ -5,6 +5,7 @@ import type { Plugin } from 'vite';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { fixtures, commandResult, encode, type MockCommand } from './data';
 import { terminal } from './terminal';
+import { workspace } from './workspace';
 
 export function mockPlugin(): Plugin {
   let data = fixtures();
@@ -14,7 +15,8 @@ export function mockPlugin(): Plugin {
       .filter((c) => c.status === 'running' || c.status === 'queued')
       .map((c) => [c.node_id, c.id]),
   );
-  let terminalSlots = new Set<string>();
+  let terminalSlots = new Map<string, number>();
+  const files = workspace(() => data.nodes);
   const sessions = new Set<string>();
   const nameTaken = (name: string, exceptID?: string) =>
     data.nodes.some(
@@ -42,7 +44,8 @@ export function mockPlugin(): Plugin {
     for (const timer of timers) clearTimeout(timer);
     timers.clear();
     for (const socket of sockets.clients) socket.close(1000, 'mock data reset');
-    terminalSlots = new Set<string>();
+    terminalSlots = new Map<string, number>();
+    files.reset();
     data = fixtures();
     nextNodeID = data.nodes.length + 1;
     busy = new Map(
@@ -79,12 +82,25 @@ export function mockPlugin(): Plugin {
     ],
     configureServer(server) {
       const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-        const match = req.url?.match(/^\/api\/nodes\/([^/]+)\/terminal$/);
+        const url = new URL(req.url!, 'http://mock.local');
+        if (url.pathname === '/api/file-sessions') {
+          if (!authenticated(req)) {
+            socket.end('HTTP/1.1 401 Rejected\r\nConnection: close\r\n\r\n');
+            return;
+          }
+          sockets.handleUpgrade(req, socket, head, (ws) => {
+            owners.set(ws, { nodeID: '', session: sessionOf(req) });
+            ws.once('close', () => owners.delete(ws));
+            files.open(ws, sessionOf(req));
+          });
+          return;
+        }
+        const match = url.pathname.match(/^\/api\/nodes\/([^/]+)\/terminal$/);
         if (!match) return;
         const node = data.nodes.find((n) => n.id === match[1]);
         const status = !authenticated(req)
           ? 401
-          : !node?.online || terminalSlots.has(node.id)
+          : !node?.online || (terminalSlots.get(node.id) || 0) >= 8
             ? 409
             : 101;
         if (status !== 101) {
@@ -97,12 +113,22 @@ export function mockPlugin(): Plugin {
           owners.set(ws, { nodeID: node!.id, session: sessionOf(req) });
           ws.once('close', () => owners.delete(ws));
           const slots = terminalSlots;
-          slots.add(node!.id);
-          terminal(ws, node!, () => slots.delete(node!.id));
+          slots.set(node!.id, (slots.get(node!.id) || 0) + 1);
+          terminal(
+            ws,
+            node!,
+            () => {
+              const count = (slots.get(node!.id) || 1) - 1;
+              if (count) slots.set(node!.id, count);
+              else slots.delete(node!.id);
+            },
+            url.searchParams.get('cwd') || '',
+          );
         });
       };
       server.httpServer!.on('upgrade', upgrade);
       server.httpServer!.once('close', () => {
+        files.reset();
         for (const timer of timers) clearTimeout(timer);
         for (const socket of sockets.clients) socket.terminate();
         sockets.close();
@@ -115,12 +141,17 @@ export function mockPlugin(): Plugin {
           return;
         }
         try {
-          let body: Record<string, unknown> = {};
-          if (req.method === 'POST' || req.method === 'PATCH') {
+          let body: Record<string, unknown> = {},
+            raw = Buffer.alloc(0);
+          if (['POST', 'PATCH', 'PUT'].includes(req.method!)) {
             const chunks = [];
             for await (const chunk of req) chunks.push(chunk);
-            const text = Buffer.concat(chunks).toString();
-            if (text) body = JSON.parse(text);
+            raw = Buffer.concat(chunks);
+            if (
+              raw.length &&
+              req.headers['content-type']?.includes('application/json')
+            )
+              body = JSON.parse(raw.toString());
           }
           const path = url.pathname.slice(5),
             method = req.method;
@@ -142,6 +173,7 @@ export function mockPlugin(): Plugin {
             problem(res, 401, 'login required');
             return;
           }
+          if (files.handle(req, res, url, body, raw, sessionOf(req))) return;
           if (path === 'session') {
             json(res, 200, { authenticated: true });
             return;
@@ -190,6 +222,7 @@ export function mockPlugin(): Plugin {
               problem(res, 400, 'unknown mock scenario');
               return;
             }
+            if (body.scenario === 'offline') files.offline();
             json(res, 200, { ok: true });
             return;
           }
@@ -350,6 +383,7 @@ export function mockPlugin(): Plugin {
             for (const [socket, owner] of owners)
               if (owner.nodeID === node.id)
                 socket.close(1000, 'mock node removed');
+            files.removeNode(node.id);
             data.nodes = data.nodes.filter((n) => n.id !== node!.id);
             data.commands = data.commands.filter((c) => c.node_id !== node!.id);
             busy.delete(node.id);
@@ -407,11 +441,13 @@ export function mockPlugin(): Plugin {
             data.commands.unshift(record);
             busy.set(node.id, record.id);
             later(() => {
+              if (!data.nodes.some((n) => n.id === record.node_id)) return;
               record.status = 'running';
               record.stdout = encode('Mock task started…\n');
             }, 650);
             later(
               () => {
+                if (!data.nodes.some((n) => n.id === record.node_id)) return;
                 Object.assign(record, commandResult(record.command, node!), {
                   finished_at: new Date().toISOString(),
                 });

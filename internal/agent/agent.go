@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"probex/internal/files"
 	"probex/internal/protocol"
 	"sync"
 	"time"
@@ -75,15 +76,13 @@ func loadIdentity(path, assignedID, name, ca, invitation string, rejoin bool) (i
 				return id, fmt.Errorf("node name differs from saved identity; use --rejoin for a new registration")
 			}
 			if assignedID != "" {
-				id.Mode = "key"
-				id.Name = name
-				id.CA = ca
-				data, err = json.Marshal(id)
-				if err != nil {
-					return id, err
-				}
-				if err = os.WriteFile(path, data, 0600); err != nil {
-					return id, err
+				next := id
+				next.Mode, next.Name, next.CA = "key", name, ca
+				if next != id {
+					if err := saveIdentity(path, next); err != nil {
+						return id, err
+					}
+					id = next
 				}
 			}
 			return id, nil
@@ -96,15 +95,14 @@ func loadIdentity(path, assignedID, name, ca, invitation string, rejoin bool) (i
 	if id.ID == "" {
 		id.Mode = "request"
 	}
+	if exists {
+		return id, saveIdentity(path, id)
+	}
 	data, err = json.Marshal(id)
 	if err != nil {
 		return id, err
 	}
-	flags := os.O_CREATE | os.O_EXCL | os.O_WRONLY
-	if exists {
-		flags = os.O_TRUNC | os.O_WRONLY
-	}
-	f, err := os.OpenFile(path, flags, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return id, err
 	}
@@ -172,6 +170,16 @@ func Run(ctx context.Context, c Config) error {
 		return fmt.Errorf("invalid CA certificate: %w", err)
 	}
 
+	return run(ctx, c, id, endpoint, client, ca != "")
+}
+
+// RunLocal serves the built-in node on the server's private in-memory transport.
+func RunLocal(ctx context.Context, client *http.Client, name string) error {
+	return run(ctx, Config{Name: name}, identity{ID: protocol.LocalNodeID, Enrolled: true}, "ws://probexd.local/agent", client, false)
+}
+
+func run(ctx context.Context, c Config, id identity, endpoint string, client *http.Client, hasCA bool) error {
+	var err error
 	delay := time.Second
 	for {
 		var welcomed bool
@@ -190,7 +198,7 @@ func Run(ctx context.Context, c Config) error {
 		var certificate *tls.CertificateVerificationError
 		var record tls.RecordHeaderError
 		if errors.As(err, &certificate) || errors.As(err, &record) || errors.Is(err, http.ErrSchemeMismatch) {
-			return connectionError(err, ca != "")
+			return connectionError(err, hasCA)
 		}
 		var permanent *permanentError
 		if errors.As(err, &permanent) {
@@ -201,7 +209,7 @@ func Run(ctx context.Context, c Config) error {
 			c.EnrollmentToken = ""
 			id.Enrolled = true
 		}
-		log.Printf("connection lost: %v; reconnect in %s", connectionError(err, ca != ""), delay)
+		log.Printf("connection lost: %v; reconnect in %s", connectionError(err, hasCA), delay)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -217,17 +225,32 @@ func Run(ctx context.Context, c Config) error {
 }
 
 type session struct {
+	fileMu      sync.Mutex
+	fileService *files.Service
+	streams     map[string]context.CancelFunc
+	endpoint    string
+	client      *http.Client
+	identity    identity
 	ctx         context.Context
 	conn        *websocket.Conn
 	commandBusy chan struct{}
 	wg          sync.WaitGroup
 	mu          sync.Mutex
-	terminal    *terminalSession
+	terminals   map[string]*terminalSession
+}
+
+func (id identity) headers() http.Header {
+	header := make(http.Header)
+	if id.Key != "" {
+		header.Set("Authorization", "Bearer "+id.Key)
+		header.Set("X-Probex-ID", id.ID)
+	}
+	return header
 }
 
 func connect(parent context.Context, c Config, id identity, endpoint string, client *http.Client) (bool, error) {
 	dial, cancel := context.WithTimeout(parent, 10*time.Second)
-	header := http.Header{"Authorization": []string{"Bearer " + id.Key}, "X-Probex-ID": []string{id.ID}}
+	header := id.headers()
 	if c.EnrollmentToken != "" {
 		header.Set("X-Enrollment-Token", c.EnrollmentToken)
 	}
@@ -241,8 +264,17 @@ func connect(parent context.Context, c Config, id identity, endpoint string, cli
 		return false, err
 	}
 	ctx, stop := context.WithCancel(parent)
-	s := &session{ctx: ctx, conn: conn, commandBusy: make(chan struct{}, 1)}
-	defer func() { stop(); conn.CloseNow(); s.wg.Wait() }()
+	s := &session{ctx: ctx, conn: conn, commandBusy: make(chan struct{}, 1), streams: map[string]context.CancelFunc{}, terminals: map[string]*terminalSession{}, endpoint: endpoint, client: client, identity: id}
+	defer func() {
+		stop()
+		conn.CloseNow()
+		s.wg.Wait()
+		if s.fileService != nil {
+			if err := s.fileService.Close(); err != nil {
+				log.Printf("close file service: %v", err)
+			}
+		}
+	}()
 	conn.SetReadLimit(protocol.MaxMessage)
 	info := Collect(ctx)
 	if err := s.send(protocol.Message{Type: "hello", Version: protocol.WireVersion, Name: c.Name, Info: &info}); err != nil {
@@ -261,13 +293,10 @@ func connect(parent context.Context, c Config, id identity, endpoint string, cli
 	if welcome.Type != "welcome" || welcome.Version != protocol.WireVersion {
 		return false, &permanentError{fmt.Errorf("unsupported welcome")}
 	}
+	s.identity.ID = welcome.ID
 	if !id.Enrolled {
 		id.Enrolled = true
-		data, err := json.Marshal(id)
-		if err != nil {
-			return false, &permanentError{err}
-		}
-		if err := os.WriteFile(c.State, data, 0600); err != nil {
+		if err := saveIdentity(c.State, id); err != nil {
 			return false, &permanentError{fmt.Errorf("save enrolled identity: %w", err)}
 		}
 	}
@@ -317,13 +346,22 @@ func connect(parent context.Context, c Config, id identity, endpoint string, cli
 			}
 			return true, err
 		}
-		if m.Type == "term_open" {
-			if err := s.openTerminal(m); err != nil {
+		if m.Type == "stream_open" {
+			if err := s.startStream(m); err != nil {
 				return true, err
 			}
 			continue
 		}
-		if m.Type == "term_input" || m.Type == "term_resize" || m.Type == "term_close" {
+		if m.Type == "stream_close" {
+			s.mu.Lock()
+			cancel := s.streams[m.ID]
+			s.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			continue
+		}
+		if m.Type == "term_resize" || m.Type == "term_close" {
 			if err := s.terminalControl(m); err != nil {
 				return true, err
 			}

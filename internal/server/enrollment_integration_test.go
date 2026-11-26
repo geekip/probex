@@ -59,6 +59,7 @@ func TestEnrollmentTLSAndSavedIdentity(t *testing.T) {
 		t.Fatal("wrong joined identity")
 	}
 	f.stopAgent()
+	f.waitOffline(node.ID)
 	data, err := os.ReadFile(f.state)
 	if err != nil {
 		t.Fatal(err)

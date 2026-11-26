@@ -148,6 +148,10 @@ func generateTLS(hosts string) (chain, key, ca []byte, err error) {
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	root, err = x509.ParseCertificate(rootDER)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, root, &serverKey.PublicKey, caKey)
 	if err != nil {
 		return nil, nil, nil, err
@@ -172,6 +176,11 @@ func exportCA(chain [][]byte) ([]byte, error) {
 	}
 	leaf := certs[0]
 	if bytes.Equal(leaf.RawIssuer, leaf.RawSubject) && leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) == nil {
+		roots := x509.NewCertPool()
+		roots.AddCert(leaf)
+		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+			return nil, fmt.Errorf("verify self-signed server certificate: %w", err)
+		}
 		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), nil
 	}
 	if len(certs) == 1 {

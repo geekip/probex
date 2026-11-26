@@ -55,6 +55,9 @@ func connectionError(err error, customCA bool) error {
 }
 
 func rejectedResponse(response *http.Response) error {
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		return &permanentError{fmt.Errorf("server HTTP %d: redirect refused; configure --server with the final endpoint", response.StatusCode)}
+	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if err != nil {
 		return fmt.Errorf("server HTTP %d: read error response: %w", response.StatusCode, err)

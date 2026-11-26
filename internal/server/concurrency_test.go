@@ -84,7 +84,7 @@ func TestIndependentCommandAndTerminal(t *testing.T) {
 				command = f.command(node.ID, text, 10)
 			}
 			f.request("POST", "/api/nodes/"+node.ID+"/commands", map[string]any{"command": "echo duplicate"}, 409, nil)
-			dial(409)
+			closeTerminal(dial(101))
 			closeTerminal(conn)
 			f.request("POST", "/api/nodes/"+node.ID+"/commands", map[string]any{"command": "echo still-busy"}, 409, nil)
 			conn = dial(101)
@@ -97,7 +97,7 @@ func TestIndependentCommandAndTerminal(t *testing.T) {
 			if command.Status != "failed" || command.ExitCode == nil || *command.ExitCode != 7 || string(command.Stdout) != "COMMAND_STDOUT" || string(command.Stderr) != "COMMAND_STDERR" || command.StartedAt == nil {
 				t.Fatalf("independent command result: %+v", command)
 			}
-			dial(409)
+			closeTerminal(dial(101))
 			for range 5 {
 				c := f.wait(f.command(node.ID, "printf next-command", 3))
 				if c.Status != "succeeded" || string(c.Stdout) != "next-command" {

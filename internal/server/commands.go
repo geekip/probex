@@ -38,7 +38,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, nodeID string) 
 	}
 	p.command = c.ID
 	s.mu.Unlock()
-	if err := send(r.Context(), p.conn, protocol.Message{Type: "exec", ID: c.ID, Command: c.Command, TimeoutSeconds: c.TimeoutSeconds}); err != nil {
+	if err := send(p.ctx, p.conn, protocol.Message{Type: "exec", ID: c.ID, Command: c.Command, TimeoutSeconds: c.TimeoutSeconds}); err != nil {
 		if saved := s.unknown(c.ID, "delivery result unknown"); saved != nil {
 			s.databaseError(w, saved)
 			return
@@ -50,7 +50,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, nodeID string) 
 	writeJSON(w, 202, c)
 }
 func (s *Server) commandMessage(p *peer, m protocol.Message) error {
-	if m.Type == "term_started" || m.Type == "term_output" || m.Type == "term_exit" {
+	if m.Type == "term_started" || m.Type == "term_exit" {
 		return s.terminalMessage(p, m)
 	}
 	s.mu.Lock()
