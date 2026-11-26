@@ -15,7 +15,7 @@ Manage devices wherever they are, as long as they can reach the Probex server. W
 
 ## Quick start
 
-This guide covers **v0.2.0**. Use matching server and client binaries. [Build from source](#build) or check [GitHub Releases](https://github.com/geekip/probex/releases) for published binaries.
+This guide covers **v0.2.1**. Use matching server and client binaries. [Build from source](#build) or check [GitHub Releases](https://github.com/geekip/probex/releases) for published binaries.
 
 | Program   | Role                                                               | Build targets                                                         |
 | --------- | ------------------------------------------------------------------ | --------------------------------------------------------------------- |
